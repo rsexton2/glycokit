@@ -1,6 +1,10 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+<<<<<<< HEAD
 *.py[codz]
+=======
+*.py[cod]
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 *$py.class
 
 # C extensions
@@ -8,6 +12,10 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+<<<<<<< HEAD
+=======
+env/
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 build/
 develop-eggs/
 dist/
@@ -20,6 +28,7 @@ parts/
 sdist/
 var/
 wheels/
+<<<<<<< HEAD
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -29,6 +38,15 @@ MANIFEST
 # PyInstaller
 #   Usually these files are written by a python script from a template
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
+=======
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 *.manifest
 *.spec
 
@@ -39,6 +57,7 @@ pip-delete-this-directory.txt
 # Unit test / coverage reports
 htmlcov/
 .tox/
+<<<<<<< HEAD
 .nox/
 .coverage
 .coverage.*
@@ -53,6 +72,17 @@ coverage.xml
 cover/
 *.json
 *.csv 
+=======
+.coverage
+.coverage.*
+.cache
+.pytest_cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 # Translations
 *.mo
 *.pot
@@ -60,8 +90,11 @@ cover/
 # Django stuff:
 *.log
 local_settings.py
+<<<<<<< HEAD
 db.sqlite3
 db.sqlite3-journal
+=======
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 
 # Flask stuff:
 instance/
@@ -74,12 +107,16 @@ instance/
 docs/_build/
 
 # PyBuilder
+<<<<<<< HEAD
 .pybuilder/
+=======
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
 
+<<<<<<< HEAD
 # IPython
 profile_default/
 ipython_config.py
@@ -146,10 +183,18 @@ rabbitmq-data/
 
 # ActiveMQ
 activemq-data/
+=======
+# pyenv
+.python-version
+
+# celery beat schedule file
+celerybeat-schedule
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 
 # SageMath parsed files
 *.sage.py
 
+<<<<<<< HEAD
 # Environments
 .env
 .envrc
@@ -159,19 +204,39 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+=======
+# dotenv
+.env
+
+# virtualenv
+.venv
+venv/
+ENV/
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 
 # Spyder project settings
 .spyderproject
 .spyproject
 
+<<<<<<< HEAD
 # Rope project settings
 .ropeproject
 
 # mkdocs/Zensical documentation
+=======
+# VS Code
+.vscode/
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 /site
 
 # mypy
 .mypy_cache/
+<<<<<<< HEAD
 .dmypy.json
 dmypy.json
 
@@ -219,3 +284,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+=======
+.DS_Store
+
+# poetry
+poetry.lock
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)

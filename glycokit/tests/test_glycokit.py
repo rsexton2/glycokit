@@ -1,6 +1,7 @@
 """
 Unit and regression test for the glycokit package.
 """
+<<<<<<< HEAD
 import csv
 import hashlib
 import itertools
@@ -104,11 +105,22 @@ def _last_counts(analysis):
 # --------------------------------------------------------------------------
 # every input and mode
 # --------------------------------------------------------------------------
+=======
+
+# Import package, test suite, and other packages as needed
+import sys
+import pytest
+import glycokit
+from glycokit.example_api import example_function
+
+
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 def test_glycokit_imported():
     """Sample test, will always pass so long as import statement worked"""
     assert "glycokit" in sys.modules
 
 
+<<<<<<< HEAD
 @pytest.mark.parametrize("value, expected",
                          [(0, 0), (1, 2), (-5, -10), (1.5, 3.0), (-2.0, -4.0)])
 def test_double_value(value, expected):
@@ -369,3 +381,22 @@ def test_legacy_compare(case, compare_params, compare_base_args, pytestconfig, t
         tail = (result.stdout + result.stderr)[-5000:]
         pytest.fail(f"failing checks: {failed}\ncommand: {shlex.join(argv)}\n\n{tail}",
                     pytrace=False)
+=======
+def test_mdanalysis_logo_length(mdanalysis_logo_text):
+    """Example test using a fixture defined in conftest.py"""
+    logo_lines = mdanalysis_logo_text.split("\n")
+    assert len(logo_lines) == 46, "Logo file does not have 46 lines!"
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (0, 0),
+        (1, 2),
+        (-5, -10),
+        (1.5, 3.0),
+        (-2.0, -4.0)
+    ],
+)
+def test_double_value(value, expected):
+    assert example_function(value) == expected
+>>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
