@@ -687,10 +687,10 @@ class GlycoAnalysis(AnalysisBase):
                    f"structure_valid={fsa.structure_valid}")
 
         if not fsa.structure_valid:
-            # msg = ("FreeSASA structure did not match the MDAnalysis residues; "
-            #        "SASA used MDAnalysis vdW radii instead of ProtOr, so areas "
-            #        "will not match the freesasa executable")
-            msg = fsa.structure_message
+            #msg = fsa.structure_message
+            msg = ("FreeSASA structure did not match the MDAnalysis residues; "
+                   "SASA used MDAnalysis vdW radii instead of ProtOr, so areas "
+                   "will not match the freesasa executable")
             if self._legacy:
                 self._error(msg)
             else:

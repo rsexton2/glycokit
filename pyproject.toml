@@ -47,31 +47,22 @@ doc = [
 # source = "https://github.com/rsexton2/glycokit"
 # documentation = "https://glycokit.readthedocs.io"
 
-<<<<<<< HEAD
 [project.scripts]
 glyco = "glycokit.glyco:main"
 standardize = "glycokit.standardize:main"
 
-=======
->>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 [tool.setuptools.packages.find]
 include = ["glycokit"]
 
 [tool.pytest.ini_options]
-<<<<<<< HEAD
 filterwarnings = [
     "ignore:numpy.ndarray size changed:RuntimeWarning",
 ]
-=======
->>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 minversion = "6.0"
 testpaths = [
     "glycokit/tests",
 ]
-<<<<<<< HEAD
 console_output_style = "count"
-=======
->>>>>>> 1f065a3 (Initial creation with MDAnalysis Cookiecutter 0.1)
 
 [tool.black]
 line-length = 80
