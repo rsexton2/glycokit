@@ -101,6 +101,12 @@ def _last_counts(analysis):
     return np.asarray(analysis.all_counts)[-1].astype(int)
 
 
+<<<<<<< HEAD
+=======
+# --------------------------------------------------------------------------
+# every input and mode
+# --------------------------------------------------------------------------
+>>>>>>> b59cecf (fixed failing tests)
 def test_glycokit_imported():
     """Sample test, will always pass so long as import statement worked"""
     assert "glycokit" in sys.modules
@@ -108,6 +114,7 @@ def test_glycokit_imported():
 
 @pytest.mark.parametrize("value, expected",
                          [(0, 0), (1, 2), (-5, -10), (1.5, 3.0), (-2.0, -4.0)])
+<<<<<<< HEAD
 def test_double_value(value, expected):
     assert example_function(value) == expected
 
@@ -383,6 +390,8 @@ def test_mdanalysis_logo_length(mdanalysis_logo_text):
         (-2.0, -4.0)
     ],
 )
+=======
+>>>>>>> b59cecf (fixed failing tests)
 def test_double_value(value, expected):
     assert example_function(value) == expected
 
@@ -412,45 +421,57 @@ def test_buried_residues_have_zero_count(case, mode, runner):
 def test_frame_summary(case, mode, runner):
     r = runner(case, mode)
     a = r.analysis
-    rows = read_csv(r.outdir / "frame_summary.csv")
-    assert len(rows) == a.n_frames
-    assert [int(float(x["frame"])) for x in rows] == a._analyzed_frames().tolist()
-
-    for k, row in enumerate(rows):
+    analyzed = a._analyzed_frames().tolist()
+    areas = np.asarray(a.residue_areas)
+    n_rows = 0
+    for k, row in enumerate(iter_csv(r.outdir / "frame_summary.csv")):
+        assert k < a.n_frames, f"frame_summary.csv has more than {a.n_frames} rows"
+        assert int(float(row["frame"])) == analyzed[k]
         assert int(float(row["n_surface_residues"])) == a.results.n_surface_residues[k]
-        surface_rows = np.flatnonzero(np.asarray(a.residue_areas)[k] >= a.area_cutoff)
+        surface_rows = np.flatnonzero(areas[k] >= a.area_cutoff)
         expected = int(np.isin(surface_rows, a._start_res_row).sum())
         assert a.results.n_surface_residues[k] == expected
-
         n_blocked = int(float(row["n_blocked_pairs"]))
         mean_d = float(row["mean_blocked_distance"])
         assert n_blocked >= 0
         assert np.isnan(mean_d) == (n_blocked == 0)
+        n_rows += 1
+    assert n_rows == a.n_frames
 
 
 def test_bfactors_npy(case, mode, runner):
     r = runner(case, mode)
-    saved = np.load(r.outdir / "b_factors.npy")
-    np.testing.assert_array_equal(saved, np.asarray(r.analysis.all_counts))
+    expected = np.asarray(r.analysis.all_counts)
+    path = r.outdir / "b_factors.npy"
+    try:
+        saved = np.load(path, mmap_mode="r")      # header read; data paged on demand
+    except ValueError:                             # e.g. zero-size array cannot be mapped
+        saved = np.load(path)
+    try:
+        assert saved.shape == expected.shape, (saved.shape, expected.shape)
+        if saved.size:
+            row_bytes = max(1, saved[0].nbytes) if saved.ndim > 1 else saved.itemsize
+            step = max(1, NPY_BLOCK_BYTES // row_bytes)
+            for s in range(0, len(saved), step):
+                np.testing.assert_array_equal(saved[s:s + step], expected[s:s + step],
+                                              err_msg=f"b_factors.npy rows {s}..{s + step - 1}")
+    finally:
+        del saved                                  # release the map (matters on Windows)
 
 
 def test_residue_summary_matches_counts(case, mode, runner, glyco):
     r = runner(case, mode)
     a = r.analysis
     keys = unique_ca_keys(glyco, a)
-    counts, sasa = last_counts(a), ca_sasa(a)
-
-    rows = read_csv(r.outdir / "residue_summary.csv")
+    counts, sasa = _last_counts(a), ca_sasa(a)
     got = {}
-    for row in rows:
+    for row in iter_csv(r.outdir / "residue_summary.csv"):
         key = (row["Chain"].strip(), row["ResNum"].strip(), row["ResName"].strip())
         assert key not in got, f"duplicate residue row {key}"
         got[key] = (int(row["Glycan_density"]), float(row["SASA"]))
-
     nonzero_only = mode != "default"
     expected = {k: int(c) for k, c in zip(keys, counts) if c or not nonzero_only}
     assert {k: v[0] for k, v in got.items()} == expected
-
     for key, s in zip(keys, sasa):
         if key in got:
             assert got[key][1] == pytest.approx(s, rel=1e-5, abs=1e-6), key
@@ -461,61 +482,74 @@ def test_excluded_atoms_consistent(case, mode, runner, glyco):
     a = r.analysis
     keys = unique_ca_keys(glyco, a)
     n_gly = len(a.gly_atoms)
-    count_of = {(c, rid): int(n) for (c, rid, _), n in zip(keys, last_counts(a))}
-
-    rows = read_csv(r.outdir / "excluded_glycan_atoms.csv")
-    per_residue = Counter((x["protein_chain"].strip(), x["protein_resid"].strip())
-                          for x in rows)
-    reported = {(x["protein_chain"].strip(), x["protein_resid"].strip()):
-                int(x["final_glycan_count"]) for x in rows}
-
-    # one row per glycan atom missing from each nonzero residue's union
-    for key, n_rows in per_residue.items():
-        assert reported[key] == count_of[key], key
-        assert n_rows == n_gly - count_of[key], key
-
-    expected = {k for k, n in count_of.items() if 0 < n < n_gly}
-    assert set(per_residue) == expected
-
-    assert {x["reason"] for x in rows} <= EXCLUSION_REASONS
+    count_of = {(c, rid): int(n) for (c, rid, _), n in zip(keys, _last_counts(a))}
     serials = {str(s) for s in glyco.pdb_atom_ids(a.gly_atoms)}
-    assert {x["glycan_atom_index"] for x in rows} <= serials
-    pairs = [(x["protein_chain"], x["protein_resid"], x["glycan_atom_index"]) for x in rows]
-    assert len(pairs) == len(set(pairs)), "duplicate excluded-atom rows"
+    per_residue, seen_in_residue = Counter(), {}
+    for row in iter_csv(r.outdir / "excluded_glycan_atoms.csv"):
+        key = (row["protein_chain"].strip(), row["protein_resid"].strip())
+        assert int(row["final_glycan_count"]) == count_of[key], key
+        assert row["reason"] in EXCLUSION_REASONS, row["reason"]
+        serial = row["glycan_atom_index"]
+        assert serial in serials, serial
+        seen = seen_in_residue.setdefault(key, set())
+        assert serial not in seen, f"duplicate row {key} {serial}"
+        seen.add(serial)
+        per_residue[key] += 1
+    for key, n_rows in per_residue.items():
+        assert n_rows == n_gly - count_of[key], key
+    assert set(per_residue) == {k for k, n in count_of.items() if 0 < n < n_gly}
+    assert not [w for w in r.warnings if "union size" in w]
 
-    mismatches = [w for w in r.warnings if "union size" in w]
-    assert not mismatches, mismatches[:5]
+
+def test_case_selections(case, case_settings, glyco):
+    """Per-structure selections select atoms; legacy glycan names select the same atoms."""
+    s = case_settings(case)
+    u = glyco.load_universe(case.top, list(case.traj) or None)
+    glycans = u.select_atoms(s["gs"])
+    assert len(glycans), f"{case.id}: gs {s['gs']!r} selects no atoms"
+    assert len(u.select_atoms(f"({s['ps']}) and name CA")), \
+        f"{case.id}: ps {s['ps']!r} selects no CA atoms"
+    legacy = s["legacy_glycans"]
+    if not legacy:
+        pytest.skip("no legacy glycan names for this structure")
+    too_long = [n for n in legacy if len(n) > 4]
+    assert not too_long, f"{case.id}: legacy tools read 4-character residue names: {too_long}"
+    legacy_atoms = u.select_atoms("resname " + " ".join(legacy))
+    assert set(legacy_atoms.indices) == set(glycans.indices), (
+        f"{case.id}: gs {s['gs']!r} selects {len(glycans)} atoms "
+        f"({sorted(set(glycans.resnames))}), but legacy names {list(legacy)} select "
+        f"{len(legacy_atoms)}; glycokit and the legacy tools would see different glycans")
 
 
 def test_cli_matches_library(case, mode, runner, glyco, glyco_cli_args,
                              pytestconfig, tmp_path):
-    r = runner(case, mode)                      # skips if mode is not possible
+    with capture(tmp_path / "radii_lib.json", require_calls=True):
+        r = runner(case, mode, cache=False)       # fresh run inside the block
+    cli_dir = tmp_path / "cli"
     argv = ["-a", case.top]
     if case.traj:
         argv += ["-b", *case.traj]
-    argv += [*glyco_cli_args, "-o", str(tmp_path), "--force", "--write-excluded",
-             "--box-workers", str(pytestconfig.getoption("--glyco-box-workers"))]
+    argv += [*glyco_cli_args(case), "-o", str(cli_dir), "--force",
+             "--write-excluded", "--box-workers", str(pytestconfig.glyco_box_workers)]
     if mode == "compat":
         argv.append("--compat")
     elif mode == "compat-v2":
         argv.append("--compat-v2")
     if r.frames is not None:
         argv += ["--frames", *map(str, r.frames)]
-
     try:
-        assert glyco.main(argv) == 0
+        with capture(tmp_path / "radii_cli.json", require_calls=True):
+            assert glyco.main(argv) == 0
     finally:
-        logging.captureWarnings(False)          # main() routes warnings to a log
-
+        logging.captureWarnings(False)
     for name in ("residue_summary.csv", "excluded_glycan_atoms.csv"):
-        assert (tmp_path / name).read_text() == (r.outdir / name).read_text(), name
+        assert_same_file(r.outdir / name, cli_dir / name, f"CLI vs library: {name}")
 
 
 # --------------------------------------------------------------------------
 # trajectories
 # --------------------------------------------------------------------------
-
-def _last_analyzed(run):
+def lastanalyzed(run):
     analyzed = run.analysis._analyzed_frames()
     if len(analyzed) < 2:
         pytest.skip("needs at least two analysed frames")
@@ -525,7 +559,7 @@ def _last_analyzed(run):
 @pytest.mark.glyco_kind("trajectory")
 def test_frame_slicing_consistent(case, mode, runner):
     full = runner(case, mode)
-    k, frame = _last_analyzed(full)
+    k, frame = lastanalyzed(full)
     single = runner(case, mode, frames=[frame])
     np.testing.assert_array_equal(single.analysis.all_counts[0],
                                   full.analysis.all_counts[k])
@@ -537,16 +571,13 @@ def test_frame_slicing_consistent(case, mode, runner):
 def test_trajectory_frame_equals_single_structure(case, mode, runner, glyco):
     """Frame k of the trajectory == the same coordinates as a 1-frame Universe."""
     from MDAnalysis.coordinates.memory import MemoryReader
-
     full = runner(case, mode)
-    k, frame = _last_analyzed(full)
-
+    k, frame = lastanalyzed(full)
     u = glyco.load_universe(case.top, list(case.traj))
     ts = u.trajectory[frame]
     extra = {} if ts.dimensions is None else {"dimensions": ts.dimensions}
     u1 = glyco.mda.Universe(case.top, u.atoms.positions.copy()[None],
                             format=MemoryReader, **extra)
-
     single = runner(case, mode, frames=None, universe=u1)
     np.testing.assert_array_equal(single.analysis.all_counts[0],
                                   full.analysis.all_counts[k])
@@ -557,34 +588,73 @@ def test_trajectory_frame_equals_single_structure(case, mode, runner, glyco):
 # --------------------------------------------------------------------------
 # --compat only
 # --------------------------------------------------------------------------
+def assertpositive_radii(calls, label):
+    bad = [(c["caller"][0], a.get("chain"), a.get("resnum"), a.get("resname"),
+            a.get("name"), a["radius"])
+           for c in calls for a in c["atoms"] if not a["radius"] > 0]
+    assert not bad, f"{label}: zero/invalid radius passed to FreeSASA: {bad[:10]}"
+
 
 @pytest.mark.slow
 @pytest.mark.glyco_modes("compat")
-def test_box_workers_serial_equals_parallel(case, mode, runner, pytestconfig):
-    n = max(2, pytestconfig.getoption("--glyco-box-workers"))
-    serial = runner(case, mode, box_workers=1)
-    parallel = runner(case, mode, box_workers=n)
+def test_box_workers_serial_equals_parallel(case, mode, runner, pytestconfig, tmp_path):
+    n = max(2, pytestconfig.glyco_box_workers)
+    probe_dir = os.environ.get("GLYCO_PROBE_DIR", str(tmp_path))
+    with capture(os.path.join(probe_dir, "serial.json")) as serial_probe:
+        serial = runner(case, mode, box_workers=1)
+    with capture(os.path.join(probe_dir, "parallel.json")) as parallel_probe:
+        parallel = runner(case, mode, box_workers=n)
+    # check FreeSASA input first: fails at the exact atom, not as a CSV diff
+    assertpositive_radii(serial_probe["calls"], "serial")
+    assertpositive_radii(parallel_probe["calls"], "parallel")
     np.testing.assert_array_equal(serial.analysis.all_counts,
                                   parallel.analysis.all_counts)
     for name in ("residue_summary.csv", "excluded_glycan_atoms.csv"):
-        assert (serial.outdir / name).read_text() == (parallel.outdir / name).read_text()
+        assert_same_file(serial.outdir / name, parallel.outdir / name,
+                         f"serial vs parallel ({n} workers): {name}")
 
 
 # --------------------------------------------------------------------------
 # legacy tools (opt-in)
 # --------------------------------------------------------------------------
-
 @pytest.mark.slow
 @pytest.mark.legacy
 @pytest.mark.glyco_kind("structure")
-def test_legacy_compare(case, pytestconfig):
-    compare = pytestconfig.getoption("--glyco-compare")
-    if not compare:
-        pytest.skip("give --glyco-compare PATH/TO/compare.py to run")
+def test_legacy_compare(case, compare_params, compare_base_args, pytestconfig, tmp_path):
+    """compare.py gating checks with the resolved (and optionally varied) parameters."""
+    script = pytestconfig.glyco_compare_script
+    if not script:
+        pytest.skip("give --glyco-compare=PATH or GLYCO_COMPARE_SCRIPT to run")
     if not case.top.lower().endswith(".pdb"):
         pytest.skip("the legacy GLYCO tools read PDB files only")
+<<<<<<< HEAD
     compare = os.path.abspath(compare)
     result = subprocess.run([sys.executable, compare, "--pdb", case.top],
                             cwd=os.path.dirname(compare),
                             capture_output=True, text=True)
     assert result.returncode == 0, (result.stdout + result.stderr)[-5000:]
+=======
+    if not pytestconfig.glyco_legacy_glycans:
+        pytest.skip("cannot derive legacy glycan names from the glycan selection; "
+                    "give --glyco-legacy-glycans or GLYCO_COMPARE_GLYCANS")
+    summary = tmp_path / "compare_summary.json"
+    argv = [sys.executable, script, "--pdb", case.top, *compare_base_args]
+    for key, value in compare_params.items():          # later flags override
+        argv += [pytestconfig.glyco_vary_flags[key], str(value)]
+    argv += ["--json-summary", str(summary)]
+    if pytestconfig.getoption("--glyco-compare-keep"):
+        argv.append("--keep-output")
+    try:
+        result = subprocess.run(argv, cwd=os.path.dirname(script), capture_output=True,
+                                text=True,
+                                timeout=pytestconfig.getoption("--glyco-compare-timeout"))
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"compare.py timed out\ncommand: {shlex.join(argv)}", pytrace=False)
+    report = json.loads(summary.read_text()) if summary.is_file() else None
+    if result.returncode != 0 or not (report and report["overall"]):
+        failed = ([label for label, ok in report["checks"].items() if not ok]
+                  if report else "compare.py did not finish (see output)")
+        tail = (result.stdout + result.stderr)[-5000:]
+        pytest.fail(f"failing checks: {failed}\ncommand: {shlex.join(argv)}\n\n{tail}",
+                    pytrace=False)
+>>>>>>> b59cecf (fixed failing tests)
