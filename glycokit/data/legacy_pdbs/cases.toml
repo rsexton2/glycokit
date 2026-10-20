@@ -1,0 +1,104 @@
+# cases.toml - per-structure settings for the glycokit / legacy GLYCO tests.
+# Glycan names and distance cutoff are taken from each file name:
+#   <name>__<GLYCAN_A>_<GLYCAN_B>...__<cutoff>_all[_bfactor].pdb
+# legacy_glycans is derived from the plain "resname ..." selection.
+
+[[case]]
+match = "1_ebola_man5__BGLN_BMAN_AMAN__23_all.pdb"
+gs = "resname BGLN BMAN AMAN"
+dc = 23
+
+[[case]]
+match = "2_ha_man5_10__BGL_BMA_AMA__23_all.pdb"
+gs = "resname BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "3_hiv_man5__BGL_BMA_AMA__23_all.pdb"
+gs = "resname BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "4_hiv_man9__BGL_BMA_AMA__26_all.pdb"
+gs = "resname BGL BMA AMA"
+dc = 26
+
+[[case]]
+match = "5_zika_man5__BMAN_BGLN_AMAN__23_all.pdb"
+gs = "resname BMAN BGLN AMAN"
+dc = 23
+
+[[case]]
+match = "6_chain_BGL_BGA_BMA_AMA__23_all.pdb"
+gs = "resname BGL BGA BMA AMA"
+dc = 23
+
+[[case]]
+match = "7_sarscov2_man5_frame_10_651-6510_clean_renumbered__BGL_BMA_AMA__23_all_bfactor.pdb"
+gs = "resname BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "8_hiv_transition_frame_chain_16__AFU_BGL_AMA_BGA_ANE__26_all_bfactor.pdb"
+gs = "resname AFU BGL AMA BGA ANE"
+dc = 26
+
+[[case]]
+match = "9_sample_input__BGL_BMA_AMA__23_all.pdb"
+gs = "resname BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "10_siv_chain_6__BGA_BGL_BMA_AMA__23_all.pdb"
+gs = "resname BGA BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "11_2020_1_glycan__ASM__23_all.pdb"
+gs = "resname ASM"
+dc = 23
+
+[[case]]
+match = "12_hiv_frame_1__BGL_BMA_AMA__23_all_bfactor.pdb"
+gs = "resname BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "13_zika_frame_1__BGLN_BMAN_AMAN__23_all.pdb"
+gs = "resname BGLN BMAN AMAN"
+dc = 23
+
+[[case]]
+match = "14_sudan_3S88__NAG__10_all_bfactor.pdb"
+gs = "resname NAG"
+dc = 10
+
+[[case]]
+match = "15_5fyl_monomer_complex__NAG_BMA_MAN__10_all.pdb"
+gs = "resname NAG BMA MAN"
+dc = 10
+
+[[case]]
+match = "16_5fyl_monomer_complex__NAG_BMA_MAN__26_all.pdb"
+gs = "resname NAG BMA MAN"
+dc = 26
+
+[[case]]
+match = "17_5fyl_trimer_complex__NAG_BMA_MAN__10_all.pdb"
+gs = "resname NAG BMA MAN"
+dc = 10
+
+[[case]]
+match = "18_sarscov2_frame_1__BGL_BMA_AMA__23_all.pdb"
+gs = "resname BGL BMA AMA"
+dc = 23
+
+[[case]]
+match = "19_1gya_one_glycan__NAG_BMA_MAN__23_all_bfactor.pdb"
+gs = "resname NAG BMA MAN"
+dc = 23
+
+[[case]]
+match = "20_6elc_O_link__NAG_GLC__10_all.pdb"
+gs = "resname NAG GLC"
+dc = 10

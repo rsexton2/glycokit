@@ -137,6 +137,9 @@ class FreesasaAnalysis(AnalysisBase):
             for i in first_atom
         ]
 
+        # set fixed radii
+        self._fixed_radii = self._executable_radii()[0]
+
         self.structure_valid, self.structure_message = self._check_residue_shapes()
         self.radii_source = "classifier"
         self.n_guessed_radii = 0
@@ -159,6 +162,7 @@ class FreesasaAnalysis(AnalysisBase):
     def _build_structure(self):
         structure = freesasa.Structure()
         positions = np.asarray(self.ag.positions, dtype=np.float64)
+        positions.setflags(write=False)       # any in-place write now raises
         xs, ys, zs = (positions[:, k].tolist() for k in range(3))
 
         try:
@@ -175,10 +179,20 @@ class FreesasaAnalysis(AnalysisBase):
                     xs[i], ys[i], zs[i],
                 )
 
+        for i, r in enumerate(self._fixed_radii):
+            structure.setRadius(i, float(r))
+
         return structure
 
     def _compute_freesasa_result(self):
         structure = self._build_structure()
+        radii = np.array([structure.radius(i) for i in range(structure.nAtoms())])
+        bad = np.flatnonzero(~np.isfinite(radii) | (radii <= 0))
+        if bad.size:
+            raise RuntimeError(
+                "invalid radii for atoms "
+                + ", ".join(f"{structure.residueName(i).strip()}:{structure.atomName(i).strip()}"
+                            for i in bad[:10]))
         return freesasa.calc(structure, self.params)
 
     def _calc_from_coords(self):
@@ -264,7 +278,10 @@ class FreesasaAnalysis(AnalysisBase):
         """
         classifier = freesasa.Classifier()          # default classifier (ProtOr)
         elements = self._atom_elements()
-        radii = np.empty(self.ag.n_atoms, dtype=float)
+        # radii = np.empty(self.ag.n_atoms, dtype=float)
+
+        radii = np.full(self.ag.n_atoms, np.nan) # instead of np.empty(n_atoms)
+
         n_guessed, unguessable = 0, []
         for i, (resname, name, element) in enumerate(
                 zip(self._atom_resnames, self._atom_names, elements)):
@@ -277,6 +294,12 @@ class FreesasaAnalysis(AnalysisBase):
                 else:
                     n_guessed += 1
             radii[i] = r
+
+        bad = np.flatnonzero(~np.isfinite(radii) | (radii <= 0))
+        if bad.size:
+            raise RuntimeError(f"unassigned/invalid radii for atoms {bad[:10]} "
+                            f"({[ (self.ag[i].resname, self.ag[i].name) for i in bad[:5]] })")
+
         return radii, n_guessed, unguessable
 
     # -- per frame ---------------------------------------------------------

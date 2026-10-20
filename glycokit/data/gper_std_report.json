@@ -1,0 +1,128 @@
+{
+  "input": "../gper.pdb",
+  "output_prefix": "../gper_std",
+  "trajectory": null,
+  "options": {
+    "glycan_resnames": null,
+    "glycan_guess": "auto",
+    "not_glycan": null,
+    "glycan_min_fraction": 0.5,
+    "glycan_chain": "G",
+    "glycan_segid": null,
+    "glycan_resid_start": 1,
+    "glycan_record": "keep",
+    "protein_chain_default": "A",
+    "histidine": "HIS",
+    "terminal_oxygens": true,
+    "caps": "keep",
+    "resname_map": {},
+    "long_resnames": "warn",
+    "altloc": "keep",
+    "frame": 0,
+    "link_cutoff": 2.0,
+    "gap_cutoff": 2.0,
+    "incomplete_sidechains": "error",
+    "renumber_blank_other": true,
+    "write_ter": true,
+    "conect": "het",
+    "keep_cryst1": true,
+    "cryst1": null,
+    "chain_overflow": "segid",
+    "ter_before_glycans": false
+  },
+  "warnings": [
+    "4-character resname 'BGLC' written in cols 18-21 (nonstandard; consider resname_map)",
+    "input box missing/placeholder; no CRYST1 written unless cryst1 given"
+  ],
+  "info": [
+    "biotite not available: PDB CCD carbohydrate list not used",
+    "1 TER record(s) placed after trailing glycans; TER names the terminal polymer residue",
+    "ANISOU records (if any) are not written"
+  ],
+  "atom_order_preserved": true,
+  "n_atoms_in": 6083,
+  "n_bonds_in": 0,
+  "glycan_classification": [
+    {
+      "resname": "BGLC",
+      "n_residues": 3,
+      "reason": "name (built-in)",
+      "kind": "glycan"
+    }
+  ],
+  "renames": {
+    "HSD->HIS": 14,
+    "OT1->O": 1,
+    "OT2->OXT": 1
+  },
+  "incomplete_residues": [],
+  "chain_copies": [],
+  "gaps": [],
+  "n_atoms_out": 6083,
+  "n_residues": 378,
+  "residues_split": [
+    "R:BGLC:1 -> G:BGLC:2",
+    "R:BGLC:1 -> G:BGLC:3"
+  ],
+  "glycans": [
+    {
+      "label": "G:BGLC:1",
+      "n_atoms": 28,
+      "orig": {
+        "resname": "BGLC",
+        "chain": "R",
+        "resid": 1,
+        "icode": "",
+        "segid": "A",
+        "record": "ATOM"
+      }
+    },
+    {
+      "label": "G:BGLC:2",
+      "n_atoms": 28,
+      "orig": {
+        "resname": "BGLC",
+        "chain": "R",
+        "resid": 1,
+        "icode": "",
+        "segid": "A",
+        "record": "ATOM"
+      }
+    },
+    {
+      "label": "G:BGLC:3",
+      "n_atoms": 28,
+      "orig": {
+        "resname": "BGLC",
+        "chain": "R",
+        "resid": 1,
+        "icode": "",
+        "segid": "A",
+        "record": "ATOM"
+      }
+    }
+  ],
+  "links": [
+    {
+      "atom1": "R:ASN:25:ND2",
+      "atom2": "G:BGLC:1:C1",
+      "distance": 1.44,
+      "source": "geometry"
+    },
+    {
+      "atom1": "R:ASN:32:ND2",
+      "atom2": "G:BGLC:2:C1",
+      "distance": 1.388,
+      "source": "geometry"
+    },
+    {
+      "atom1": "R:ASN:44:ND2",
+      "atom2": "G:BGLC:3:C1",
+      "distance": 1.388,
+      "source": "geometry"
+    }
+  ],
+  "unattached_glycans": [],
+  "n_conect_bonds": 3,
+  "hybrid36": false
+}

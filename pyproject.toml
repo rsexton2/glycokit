@@ -49,15 +49,20 @@ doc = [
 
 [project.scripts]
 glyco = "glycokit.glyco:main"
+standardize = "glycokit.standardize:main"
 
 [tool.setuptools.packages.find]
 include = ["glycokit"]
 
 [tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:numpy.ndarray size changed:RuntimeWarning",
+]
 minversion = "6.0"
 testpaths = [
     "glycokit/tests",
 ]
+console_output_style = "count"
 
 [tool.black]
 line-length = 80
