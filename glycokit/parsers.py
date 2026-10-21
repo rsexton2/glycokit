@@ -42,20 +42,27 @@ def base_parser():
     frame_start/frame_stop/frame_step/frame_list rather than
     start/stop/step/frames, because AnalysisBase uses the latter names for
     its own internal state and would silently overwrite them.
+
+    :return: The glyco argument parser.
+    :rtype: argparse.ArgumentParser
     """
     description = (
-        "glyco: identify glycan-accessible protein surface residues from "
+        "glyco: compute glycan shielding of protein surface residues from "
         "a topology/trajectory (or a directory of independent structures), "
         "using FreeSASA for surface exposure and a line-of-sight blocking "
-        "test to determine glycan accessibility."
+        "test (van der Waals spheres by default, a cylinder with "
+        "--cylinder) to count the glycan atoms each residue can see."
     )
     epilog = textwrap.dedent(
         "examples:\n"
         "  glyco -a top.pdb -b traj.xtc --ps protein --gs 'resname NAG BMA'\n"
         "  glyco -a top.pdb -b run1.xtc run2.xtc --ps protein --gs glycan\n"
         "  glyco --indir ./structures --ps protein --gs glycan\n"
+        "  glyco -a top.pdb --gs glycan --vdw-scale 0.8 --write-blockers\n"
+        "  glyco -a top.pdb --gs glycan --cylinder --cr 1.4\n"
         "  glyco -a top.pdb --gs glycan --compat --write-excluded\n"
         "  glyco -a top.pdb --gs glycan --compat-v2 --cr 1.4 --write-excluded\n"
+        "  glyco -a top.pdb -b traj.xtc --gs glycan -j -1\n"
     )
 
     parser = _HelpOnNoArgsParser(
@@ -102,7 +109,10 @@ def base_parser():
         metavar='SELECTION',
         help='MDAnalysis atom selection for the protein residues used as '
              'line-of-sight STARTING points (and reported in the output). '
-             'Does not restrict which atoms can block; see --bs',
+             'Every heavy atom of a surface residue is a start; a residue\'s '
+             'count is the number of UNIQUE glycan atoms visible from any '
+             'of them. Each residue needs exactly one CA atom. Does not '
+             'restrict which atoms can block; see --bs',
     )
     selection_group.add_argument(
         '--bs', '--block-sel', type=str, default='protein', dest='block_sel',
@@ -123,7 +133,9 @@ def base_parser():
         '--dc', '--distance-cutoff', type=float, default=30,
         dest='distance_cutoff', metavar='ANGSTROM',
         help='distance cutoff for considering a protein/glycan atom pair '
-             '(in Angstrom)',
+             '(in Angstrom); a pair is considered if its distance is '
+             'strictly below the cutoff. --compat truncates the cutoff to '
+             'an integer, as GLYCO v1',
     )
     geometry_group.add_argument(
         '--ac', '--area-cutoff', type=float, default=30, dest='area_cutoff',
@@ -133,12 +145,36 @@ def base_parser():
              'line-of-sight starting points',
     )
     geometry_group.add_argument(
+        '--cylinder', action='store_true', dest='cylinder',
+        help='use the cylinder blocking test (radius --cr, inclusive; own '
+             'residue excluded) instead of the default van der Waals '
+             'sphere test. Implied by --compat-v2; not allowed with '
+             '--compat',
+    )
+    geometry_group.add_argument(
         '--cr', '--cylinder-radius', type=float, default=1.4, dest='radius',
         metavar='ANGSTROM',
-        help='exclusion radius used when testing whether a protein atom '
-             'blocks a protein-glycan line of sight (in Angstrom). Ignored '
-             'with --compat (box test). Use the same value as GLYCO-2\'s '
-             '-cyl_radius (GLYCO-2 default 1.4) with --compat-v2',
+        help='radius of the cylinder used by the cylinder blocking test '
+             '(in Angstrom). Only used with --cylinder or --compat-v2; '
+             'ignored by the default van der Waals test and by --compat '
+             '(box test). Use the same value as GLYCO-2\'s -cyl_radius '
+             '(GLYCO-2 default 1.4) with --compat-v2',
+    )
+    geometry_group.add_argument(
+        '--vdw-scale', type=float, default=1.0, dest='vdw_scale',
+        metavar='FACTOR',
+        help='scale factor for the blocker van der Waals radii in the '
+             'default blocking test: a blocker blocks a line of sight that '
+             'touches its sphere of radius vdw_scale * r_vdW + vdw_probe '
+             '(radii looked up by element). Ignored with --cylinder, '
+             '--compat and --compat-v2',
+    )
+    geometry_group.add_argument(
+        '--vdw-probe', type=float, default=0.0, dest='vdw_probe',
+        metavar='ANGSTROM',
+        help='added to every scaled blocker van der Waals radius in the '
+             'default blocking test (in Angstrom). Not the FreeSASA probe '
+             '(see --pr). Ignored with --cylinder, --compat and --compat-v2',
     )
     geometry_group.add_argument(
         '--pr', '--probe-radius', type=float, default=1.4, dest='probe',
@@ -207,9 +243,10 @@ def base_parser():
     output_group.add_argument(
         '--write-blockers', action='store_true', dest='write_blockers',
         help='additionally write blockers.csv: one row per blocking protein '
-             'atom for every blocked start-atom/glycan-atom pair (frame '
-             'chosen by --bfactor-frame). Can be very large. Not supported '
-             'with --compat, whose box test does not identify blocking atoms',
+             'atom (van der Waals or cylinder test) for every blocked '
+             'start-atom/glycan-atom pair (frame chosen by '
+             '--bfactor-frame). Can be very large. Not supported with '
+             '--compat, whose box test does not identify blocking atoms',
     )
 
     # --- compatibility ---------------------------------------------------
@@ -219,28 +256,27 @@ def base_parser():
         'parsing)'
     )
     compat_group.add_argument(
-        '--compat', '--compat-v1', '--compat-box', action='store_true',
-        dest='compat',
-        help='reproduce the ORIGINAL GLYCO script (v1): every heavy atom of '
-             'a surface residue is a line-of-sight start and a residue\'s '
-             'count is the number of UNIQUE glycan atoms visible from any of '
-             'them; integer distance cutoff; legacy hydrogen filter (drops '
-             'any atom with an H in its name, e.g. NH1, OH); blockers from '
-             'ATOM records only; the original blocking test (1 A sampling '
-             'along the line, int-truncated sample points and a +-1 A '
-             'axis-aligned box instead of a cylinder; --cr is ignored); '
-             'FreeSASA on the atoms the freesasa executable uses on the '
-             'whole PDB (see --sasa-env, --sasa-hetatm). Slower than the '
-             'default. --compat-box is a deprecated alias',
+        '--compat', '--compat-v1', action='store_true', dest='compat',
+        help='reproduce the ORIGINAL GLYCO script (v1): residue-union '
+             'counting over every heavy atom of a surface residue (as in '
+             'the default); integer distance cutoff; legacy hydrogen '
+             'filter (drops any atom with an H in its name, e.g. NH1, OH); '
+             'blockers from ATOM records only; the original blocking test '
+             '(1 A sampling along the line, int-truncated sample points '
+             'and a +-1 A axis-aligned box; --cr, --cylinder, --vdw-scale '
+             'and --vdw-probe do not apply); FreeSASA on the atoms the '
+             'freesasa executable uses on the whole PDB (see --sasa-env, '
+             '--sasa-hetatm). Slower than the default',
     )
     compat_group.add_argument(
         '--compat-v2', action='store_true', dest='compat_v2',
         help='reproduce GLYCO-2: the same residue-union counting, legacy '
              'hydrogen filter and FreeSASA atom set as --compat, but with '
              'a float distance cutoff and the CYLINDER blocking test using '
-             '--cr. Atoms of the start residue can block, the radius test '
-             'is inclusive (d <= r) and the pair/cylinder arithmetic follows '
-             'GLYCO-2\'s float32 precision, as in GLYCO-2',
+             '--cr (implies --cylinder; --vdw-scale and --vdw-probe are '
+             'ignored). Atoms of the start residue can block, the radius '
+             'test is inclusive (d <= r) and the pair/cylinder arithmetic '
+             'follows GLYCO-2\'s float32 precision, as in GLYCO-2',
     )
     compat_group.add_argument(
         '--sasa-env', type=str, default=None, dest='sasa_env',
@@ -258,20 +294,22 @@ def base_parser():
              'legacy FreeSASA atom set, like running the freesasa executable '
              'with --hetatm. Has no effect when --sasa-env is given',
     )
-    compat_group.add_argument(
-        '--box-workers', type=int, default=1, dest='box_workers',
-        metavar='N',
-        help='number of worker processes for the --compat box test; use 1 '
-             'for serial execution. A new process pool is started for every '
-             'analyzed frame, so large values mainly pay off for big systems '
-             'or few frames',
-    )
 
     # --- misc -----------------------------------------------------------
     misc_group = parser.add_argument_group('misc')
     misc_group.add_argument(
         '-v', '--verbose', action='store_true',
         help='print progress output during the run',
+    )
+    misc_group.add_argument(
+        '-j', '--n-workers', type=int, default=1, dest='n_workers',
+        metavar='N',
+        help='number of parallel workers; -1 uses all processors. In the '
+             'default, --cylinder and --compat-v2 modes these are threads '
+             'for the KD-tree neighbour queries; with --compat they are '
+             'worker processes for the box test (a new process pool is '
+             'started for every analyzed frame, so large values mainly pay '
+             'off for big systems or few frames)',
     )
 
     return parser

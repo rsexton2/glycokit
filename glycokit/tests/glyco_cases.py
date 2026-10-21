@@ -10,9 +10,10 @@ import fnmatch
 import json
 import os
 import re
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+import tomllib
 
 MODES = ("default", "compat-v2", "compat")
 SIDECAR_SUFFIX = ".glyco.toml"
