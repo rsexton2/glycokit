@@ -248,40 +248,42 @@ def run_analysis(command):
     :return: ``(exit code, combined stdout and stderr)``
     :rtype: tuple[int, str]
     """
-    progress_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json").name
-    log_file = tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".log")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as progress_handle:
+        progress_file = progress_handle.name
 
-    env = os.environ.copy()
-    env["GLYCO_PROGRESS_FILE"] = progress_file
-    env["GLYCO_STREAMLIT"] = "1"
+    with tempfile.NamedTemporaryFile(
+        mode="w+", delete=False, suffix=".log"
+    ) as log_file:
+        env = os.environ.copy()
+        env["GLYCO_PROGRESS_FILE"] = progress_file
+        env["GLYCO_STREAMLIT"] = "1"
 
-    try:
-        process = subprocess.Popen(
-            command, stdout=log_file, stderr=subprocess.STDOUT, env=env, text=True
-        )
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        while process.poll() is None:
-            try:
-                with open(progress_file) as f:
-                    percent = int(json.load(f).get("percent", 0))
-                progress_bar.progress(min(percent, 100))
-                status_text.text(f"Analyzing: {percent}%")
-            except (FileNotFoundError, json.JSONDecodeError, ValueError):
-                pass
-            time.sleep(0.2)
+        try:
+            process = subprocess.Popen(
+                command, stdout=log_file, stderr=subprocess.STDOUT, env=env, text=True
+            )
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            while process.poll() is None:
+                try:
+                    with open(progress_file) as f:
+                        percent = int(json.load(f).get("percent", 0))
+                    progress_bar.progress(min(percent, 100))
+                    status_text.text(f"Analyzing: {percent}%")
+                except (FileNotFoundError, json.JSONDecodeError, ValueError):
+                    pass
+                time.sleep(0.2)
 
-        log_file.flush()
-        log_file.seek(0)
-        output = log_file.read()
-        progress_bar.empty()
-        status_text.empty()
-        return process.returncode, output
-    finally:
-        log_file.close()
-        for path in (progress_file, log_file.name):
-            if os.path.exists(path):
-                os.remove(path)
+            log_file.flush()
+            log_file.seek(0)
+            output = log_file.read()
+            progress_bar.empty()
+            status_text.empty()
+            return process.returncode, output
+        finally:
+            for path in (progress_file, log_file.name):
+                if os.path.exists(path):
+                    os.remove(path)
 
 
 def remove_file(path):

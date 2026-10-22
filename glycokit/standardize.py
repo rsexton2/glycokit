@@ -23,7 +23,6 @@ Outputs: <prefix>.pdb, <prefix>_residues.csv, <prefix>_report.json
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import re
@@ -35,6 +34,8 @@ from pathlib import Path
 
 import MDAnalysis as mda
 import numpy as np
+
+from glycokit.parsers import standardize_parser
 
 # ----------------------------------------------------------------- constants
 # fmt: off
@@ -152,42 +153,41 @@ class StandardizeOptions:
     time (e.g. ``glycan_placement='auto'``) are only recorded in the report.
     """
 
-    glycan_resnames: tuple | None = None  # extra glycan names, added to the name lists
-    glycan_guess: str = "auto"  # off | names | auto (names + structure test)
-    not_glycan: tuple | None = None  # resnames never treated as glycans
-    glycan_min_fraction: float = 0.5  # auto: fraction of tested residues that must pass
-    glycan_segid: str | None = None  # default: same as glycan_chain
-    glycan_resid_start: int = 1
-    glycan_record: str = "keep"  # keep | ATOM | HETATM
-    protein_chain_default: str = "A"  # used only when chain IDs are blank (e.g. GRO)
-    histidine: str | None = "HIS"  # None keeps HSD/HSE/...
-    terminal_oxygens: bool = True  # OT1/OT2 -> O/OXT
-    caps: str = "keep"  # keep | split  (CHARMM ACE/CT3 caps)
-    resname_map: dict = field(default_factory=dict)
-    long_resnames: str = "warn"  # allow | warn | error  (4-char resnames)
     altloc: str = "keep"  # keep | first  ('first' drops atoms!)
-    frame: int = 0
-    link_cutoff: float = 2.0  # Angstrom, geometric glycan link detection
-    gap_cutoff: float = 2.0  # Angstrom, C(i)-N(i+1) distance reported as gap
-    incomplete_sidechains: str = "error"  # error | warn
-    renumber_blank_other: bool = True  # renumber solvent/ions that had no chain ID
-    write_ter: bool = True
+    caps: str = "keep"  # keep | split  (CHARMM ACE/CT3 caps)
+    chain_overflow: str = "segid"  # segid | error  (more copies than chain IDs)
     conect: str = "het"  # none | het | all
-    keep_cryst1: bool = True
     cryst1: tuple | None = (
         None  # explicit (a, b, c[, alpha, beta, gamma]); written as P 1
     )
-    chain_overflow: str = "segid"  # segid | error  (more copies than chain IDs)
-    ter_before_glycans: bool = (
-        False  # True: old behaviour (TER before attached glycans)
-    )
-    glycan_placement: str = "auto"  # auto | keep | after-chain | end
-    glycan_chain: str = (
-        "G"  # unattached glycans, or all with glycan_chain_mode="single"
-    )
+    frame: int = 0
+    gap_cutoff: float = 2.0  # Angstrom, C(i)-N(i+1) distance reported as gap
     glycan_chain_mode: str = (
         "attached"  # attached: case-swapped protein chain | single: all in glycan_chain
     )
+    glycan_chain: str = (
+        "G"  # unattached glycans, or all with glycan_chain_mode="single"
+    )
+    glycan_guess: str = "auto"  # off | names | auto (names + structure test)
+    glycan_min_fraction: float = 0.5  # auto: fraction of tested residues that must pass
+    glycan_placement: str = "auto"  # auto | keep | after-chain | end
+    glycan_record: str = "keep"  # keep | ATOM | HETATM
+    glycan_resid_start: int = 1
+    glycan_resnames: tuple | None = None  # extra glycan names, added to the name lists
+    glycan_segid: str | None = None  # default: same as glycan_chain
+    histidine: str | None = "HIS"  # None keeps HSD/HSE/...
+    incomplete_sidechains: str = "error"  # error | warn
+    keep_cryst1: bool = True
+    link_cutoff: float = 2.0  # Angstrom, geometric glycan link detection
+    long_resnames: str = "warn"  # allow | warn | error  (4-char resnames)
+    not_glycan: tuple | None = None  # resnames never treated as glycans
+    protein_chain_default: str = "A"  # used only when chain IDs are blank (e.g. GRO)
+    renumber_blank_other: bool = True  # renumber solvent/ions that had no chain ID
+    ter_before_glycans: bool = (
+        False  # True: old behaviour (TER before attached glycans)
+    )
+    terminal_oxygens: bool = True  # OT1/OT2 -> O/OXT
+    write_ter: bool = True
 
 
 @dataclass
@@ -422,7 +422,7 @@ def _ccd_carbohydrates():
         from biotite.structure.info import carbohydrate_names
 
         return frozenset(str(n).upper() for n in carbohydrate_names())
-    except Exception:  # not installed, or API/data unavailable
+    except Exception:  # not installed, or API/data unavailable  # noqa: BLE001
         return frozenset()
 
 
@@ -1909,122 +1909,42 @@ def main(argv=None):
     :param argv: Arguments (default: ``sys.argv[1:]``).
     :type argv: list[str] or None
     """
-    p = argparse.ArgumentParser(description="Standardize GLYCO/glycokit inputs")
-    p.add_argument("topology")
-    p.add_argument(
-        "-o",
-        "--out",
-        help="output prefix (default: <input>_std, next to the input file)",
-    )
-    p.add_argument("--traj")
-    p.add_argument("--topology-format")
-    p.add_argument(
-        "--glycan-resnames",
-        nargs="+",
-        help="extra glycan residue names (added to the built-in list)",
-    )
-    p.add_argument("--glycan-segid")
-    p.add_argument("--glycan-resid-start", type=int, default=1)
-    p.add_argument(
-        "--glycan-record", choices=["keep", "ATOM", "HETATM"], default="keep"
-    )
-    p.add_argument("--protein-chain-default", default="A")
-    p.add_argument("--keep-his-names", action="store_true")
-    p.add_argument("--no-terminal-oxygens", action="store_true")
-    p.add_argument("--caps", choices=["keep", "split"], default="keep")
-    p.add_argument("--resname-map", nargs="*", default=[], help="OLD=NEW pairs")
-    p.add_argument(
-        "--long-resnames", choices=["allow", "warn", "error"], default="warn"
-    )
-    p.add_argument("--altloc", choices=["keep", "first"], default="keep")
-    p.add_argument("--frame", type=int, default=0)
-    p.add_argument("--link-cutoff", type=float, default=2.0)
-    p.add_argument("--gap-cutoff", type=float, default=2.0)
-    p.add_argument(
-        "--allow-incomplete",
-        action="store_true",
-        help="warn instead of failing on truncated side chains/missing heavy atoms",
-    )
-    p.add_argument("--no-renumber-solvent", action="store_true")
-    p.add_argument("--conect", choices=["none", "het", "all"], default="het")
-    p.add_argument("--no-keep-cryst1", action="store_true")
-    p.add_argument("--cryst1", nargs="+", type=float)
-    p.add_argument(
-        "--chain-overflow",
-        choices=["segid", "error"],
-        default="segid",
-        help="when chain copies exceed the 62 PDB chain IDs: reuse letters "
-        "with unique segids (default) or fail",
-    )
-    p.add_argument(
-        "--glycan-guess",
-        choices=["off", "names", "auto"],
-        default="auto",
-        help="off: built-in list + --glycan-resnames only; names: also CHARMM "
-        "and PDB CCD names; auto (default): also detect sugar rings",
-    )
-    p.add_argument(
-        "--not-glycan",
-        nargs="+",
-        help="residue names never treated as glycans (overrides guessing)",
-    )
-    p.add_argument(
-        "--ter-before-glycans",
-        action="store_true",
-        help="write TER between a protein chain and its attached glycans "
-        "(old behaviour)",
-    )
-    p.add_argument(
-        "--glycan-placement",
-        choices=["auto", "keep", "after-chain", "end"],
-        default="auto",
-        help="keep: input atom order; after-chain: attached glycans follow their "
-        "chain's TER; end: all glycans after all polymer chains. auto = "
-        "after-chain without --traj, keep with --traj",
-    )
-    p.add_argument(
-        "--glycan-chain",
-        default="G",
-        help="chain for unattached glycans (or all glycans with --glycan-chain-mode single)",
-    )
-    p.add_argument(
-        "--glycan-chain-mode",
-        choices=["attached", "single"],
-        default="attached",
-        help="attached: case-swapped letter of the protein chain they are linked "
-        "to; single: one chain for all glycans (old behaviour)",
-    )
-
+    p = standardize_parser()
     a = p.parse_args(argv)
+    if a.cryst1 and len(a.cryst1) not in (3, 6):
+        p.error(
+            f"--cryst1 takes 3 or 6 values (A B C [ALPHA BETA GAMMA]), "
+            f"got {len(a.cryst1)}"
+        )
 
     out = normalise_output_prefix(a.out) if a.out else default_output_prefix(a.topology)
     opt = StandardizeOptions(
-        glycan_resnames=tuple(a.glycan_resnames) if a.glycan_resnames else None,
-        glycan_chain=a.glycan_chain,
-        glycan_segid=a.glycan_segid,
-        glycan_resid_start=a.glycan_resid_start,
-        glycan_record=a.glycan_record,
-        protein_chain_default=a.protein_chain_default,
-        histidine=None if a.keep_his_names else "HIS",
-        terminal_oxygens=not a.no_terminal_oxygens,
-        caps=a.caps,
-        resname_map=dict(s.split("=", 1) for s in a.resname_map),
-        long_resnames=a.long_resnames,
         altloc=a.altloc,
-        frame=a.frame,
-        link_cutoff=a.link_cutoff,
-        gap_cutoff=a.gap_cutoff,
-        incomplete_sidechains="warn" if a.allow_incomplete else "error",
-        renumber_blank_other=not a.no_renumber_solvent,
-        conect=a.conect,
-        keep_cryst1=not a.no_keep_cryst1,
-        cryst1=tuple(a.cryst1) if a.cryst1 else None,
+        caps=a.caps,
         chain_overflow=a.chain_overflow,
-        glycan_guess=a.glycan_guess,
-        not_glycan=tuple(a.not_glycan) if a.not_glycan else None,
-        glycan_placement=a.glycan_placement,
-        ter_before_glycans=a.ter_before_glycans,
+        conect=a.conect,
+        cryst1=tuple(a.cryst1) if a.cryst1 else None,
+        frame=a.frame,
+        gap_cutoff=a.gap_cutoff,
         glycan_chain_mode=a.glycan_chain_mode,
+        glycan_chain=a.glycan_chain,
+        glycan_guess=a.glycan_guess,
+        glycan_placement=a.glycan_placement,
+        glycan_record=a.glycan_record,
+        glycan_resid_start=a.glycan_resid_start,
+        glycan_resnames=tuple(a.glycan_resnames) if a.glycan_resnames else None,
+        glycan_segid=a.glycan_segid,
+        histidine=None if a.keep_his_names else "HIS",
+        incomplete_sidechains="warn" if a.allow_incomplete else "error",
+        keep_cryst1=not a.no_keep_cryst1,
+        link_cutoff=a.link_cutoff,
+        long_resnames=a.long_resnames,
+        not_glycan=tuple(a.not_glycan) if a.not_glycan else None,
+        protein_chain_default=a.protein_chain_default,
+        renumber_blank_other=not a.no_renumber_solvent,
+        resname_map=(dict(a.resname_map),),
+        ter_before_glycans=a.ter_before_glycans,
+        terminal_oxygens=not a.no_terminal_oxygens,
     )
     rep = standardize(a.topology, out, a.traj, opt, a.topology_format)
 

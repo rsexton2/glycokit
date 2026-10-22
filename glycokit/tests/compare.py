@@ -250,7 +250,9 @@ def run_command(command, label, cwd=None):
     print("$", " ".join(command))
     print("=" * 80)
 
-    result = subprocess.run(command, cwd=cwd, text=True, capture_output=True)
+    result = subprocess.run(
+        command, check=False, cwd=cwd, text=True, capture_output=True
+    )
 
     if result.stdout.strip():
         print(result.stdout.rstrip())

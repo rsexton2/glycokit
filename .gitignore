@@ -240,4 +240,4 @@ __marimo__/
 poetry.lock
 
 # mdanalysis offsets for test files
-*offsets*.npz
+*offsets.npz

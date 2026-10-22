@@ -48,8 +48,7 @@ doc = [
 # documentation = "https://glycokit.readthedocs.io"
 
 [project.scripts]
-glyco = "glycokit.glyco:main"
-standardize = "glycokit.standardize:main"
+glyco = "glycokit.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["glycokit"]

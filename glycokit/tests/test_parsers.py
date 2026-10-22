@@ -14,7 +14,9 @@ from glycokit.parsers import (
     n_workers_int,
     non_negative_float,
     positive_float,
+    standardize_parser,
 )
+from glycokit.standardize import StandardizeOptions
 
 NAN_SPELLINGS = ("nan", "NaN", "-nan")
 
@@ -234,3 +236,35 @@ def test_compare_parser_env_defaults_rejected(monkeypatch, capsys, env, value, m
     with pytest.raises(SystemExit):
         compare_parser().parse_args([])
     assert message in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# standardize_parser
+# --------------------------------------------------------------------------
+
+
+def test_standardize_parser_defaults_match_options():
+    a = standardize_parser().parse_args(["in.pdb"])
+    o = StandardizeOptions()
+    assert a.glycan_guess == o.glycan_guess
+    assert a.glycan_chain == o.glycan_chain
+    assert a.glycan_chain_mode == o.glycan_chain_mode
+    assert a.glycan_segid == o.glycan_segid
+    assert a.glycan_resid_start == o.glycan_resid_start
+    assert a.glycan_record == o.glycan_record
+    assert a.glycan_placement == o.glycan_placement
+    assert a.ter_before_glycans == o.ter_before_glycans
+    assert a.link_cutoff == o.link_cutoff
+    assert a.gap_cutoff == o.gap_cutoff
+    assert a.protein_chain_default == o.protein_chain_default
+    assert a.chain_overflow == o.chain_overflow
+    assert a.caps == o.caps
+    assert a.long_resnames == o.long_resnames
+    assert a.altloc == o.altloc
+    assert a.frame == o.frame
+    assert a.conect == o.conect
+    assert (not a.no_keep_cryst1) == o.keep_cryst1
+    assert (not a.no_renumber_solvent) == o.renumber_blank_other
+    assert (not a.no_terminal_oxygens) == o.terminal_oxygens
+    assert (None if a.keep_his_names else "HIS") == o.histidine
+    assert ("warn" if a.allow_incomplete else "error") == o.incomplete_sidechains
