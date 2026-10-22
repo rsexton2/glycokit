@@ -1,52 +1,255 @@
+"""
+Streamlit front end for glyco (GlyCo, GLYcan COverage).
+
+Sections: 1 load files, 2 Universe information, 3 atom selections,
+4 trajectory frames, 5 analysis parameters (generated from
+:func:`glycokit.parsers.base_parser`), 6 run and download results.
+"""
+
+import argparse
+import atexit
+import io
+import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
-import ast
-import argparse
-import shlex
-import json
 import time
+import zipfile
 
-import streamlit as st
 import MDAnalysis as mda
 import streamlit as st
 
-from parsers import base_parser
+from glycokit.parsers import base_parser
 
 # =====================================================================
 # Configuration
 # =====================================================================
 
-ANALYSIS_SCRIPT = os.path.join(
-    os.path.dirname(__file__),
-    "glyco_analysis.py",
-)
-
-PARSER_SCRIPT = os.path.join(
-    os.path.dirname(__file__),
-    "parsers.py",
-)
+GLYCO_COMMAND = [sys.executable, "-m", "glycokit.glyco"]
 
 parser = base_parser()
 
-exclude_args = ["top", "traj", "prot_sel", "gly_sel", "start", "stop", "step",
-                "frames", "in_folder", "outdir"]
+# Parser destinations set by sections 1-4 or by the app itself; they are
+# not shown as widgets in section 5.
+HANDLED_DESTS = {
+    "top",
+    "traj",
+    "indir",
+    "in_types",  # section 1
+    "prot_sel",
+    "gly_sel",  # section 3
+    "frame_start",
+    "frame_stop",
+    "frame_step",
+    "frame_list",  # section 4
+    "outdir",
+    "force",
+    "verbose",  # set by the app
+}
+
+# argparse type functions by name -> widget type
+_TYPE_NAMES = {
+    "int": "int",
+    "float": "float",
+    "str": "str",
+    "positive_float": "float",
+    "non_negative_float": "float",
+    "n_workers_int": "int",
+}
+
+# Lower bound of the number widget per argparse type function
+_MIN_VALUES = {"positive_float": 1e-6, "non_negative_float": 0.0, "n_workers_int": -1}
+
 
 # =====================================================================
 # Helper functions
 # =====================================================================
 
+
+def get_analysis_arguments(parser):
+    """
+    Describe every option of ``parser`` as a dict (help action excluded).
+
+    :param parser: Parser to describe.
+    :type parser: argparse.ArgumentParser
+    :return: One dict per option with ``name``, ``dest``, ``option_strings``,
+        ``required``, ``default``, ``type`` (widget type), ``type_name``
+        (argparse type function name), ``action``, ``nargs``, ``choices``
+        and ``help``.
+    :rtype: list[dict]
+    """
+    arguments = []
+    for action in parser._actions:
+        if isinstance(action, argparse._HelpAction):
+            continue
+        if action.default == argparse.SUPPRESS:
+            continue
+
+        if isinstance(action, argparse._StoreTrueAction):
+            action_type = "store_true"
+        elif isinstance(action, argparse._StoreFalseAction):
+            action_type = "store_false"
+        elif isinstance(action, argparse._AppendAction):
+            action_type = "append"
+        else:
+            action_type = None
+
+        type_name = getattr(action.type, "__name__", "str") if action.type else "str"
+        arguments.append(
+            {
+                "name": action.option_strings[0]
+                if action.option_strings
+                else action.dest,
+                "dest": action.dest,
+                "option_strings": action.option_strings,
+                "required": action.required,
+                "default": action.default,
+                "type": _TYPE_NAMES.get(type_name, "str"),
+                "type_name": type_name,
+                "action": action_type,
+                "nargs": action.nargs,
+                "choices": action.choices,
+                "help": action.help or "",
+            }
+        )
+    return arguments
+
+
+def create_cli_inputs(parser, exclude=HANDLED_DESTS):
+    """
+    Streamlit widgets for every parser option not in ``exclude``.
+
+    :param parser: Parser whose options are shown.
+    :type parser: argparse.ArgumentParser
+    :param exclude: Destinations handled elsewhere.
+    :type exclude: set[str]
+    :return: ``(values, errors)``: widget value per destination, and the
+        input errors that must be fixed before running.
+    :rtype: tuple[dict, list[str]]
+    """
+    values, errors = {}, []
+    for arg in get_analysis_arguments(parser):
+        dest = arg["dest"]
+        if dest in exclude:
+            continue
+
+        default, arg_type = arg["default"], arg["type"]
+        help_text = arg["help"]
+        label = max(arg["option_strings"] or [arg["name"]], key=len).lstrip("-")
+        key = f"cli_{dest}"
+        min_value = _MIN_VALUES.get(arg["type_name"])
+
+        if arg["action"] in ("store_true", "store_false"):
+            value = (
+                default if isinstance(default, bool) else arg["action"] == "store_false"
+            )
+            values[dest] = st.checkbox(label, value=value, help=help_text, key=key)
+
+        elif arg["choices"] is not None:
+            choices = list(arg["choices"])
+            if default is None and not arg["required"]:
+                choices = [None] + choices
+            index = choices.index(default) if default in choices else 0
+            values[dest] = st.selectbox(
+                label,
+                choices,
+                index=index,
+                help=help_text,
+                key=key,
+                format_func=lambda x: "(default)" if x is None else str(x),
+            )
+
+        elif arg["nargs"] in ("+", "*") or arg["action"] == "append":
+            defaults = (
+                list(default)
+                if isinstance(default, (list, tuple))
+                else []
+                if default is None
+                else [default]
+            )
+            text = st.text_input(
+                label,
+                value=", ".join(map(str, defaults)),
+                key=key,
+                help=f"{help_text} Enter multiple values separated by commas.",
+            )
+            raw = [x.strip() for x in text.split(",") if x.strip()]
+            try:
+                convert = {"int": int, "float": float}.get(arg_type, str)
+                values[dest] = [convert(x) for x in raw]
+            except ValueError:
+                errors.append(f"{label}: expected {arg_type} values")
+                values[dest] = []
+
+        elif arg_type in ("int", "float") and default is None:
+            # optional number: blank means "use the program default"
+            text = st.text_input(
+                label, value="", key=key, help=f"{help_text} (blank = default)"
+            )
+            try:
+                convert = int if arg_type == "int" else float
+                values[dest] = convert(text) if text.strip() else None
+            except ValueError:
+                errors.append(f"{label}: expected a number")
+                values[dest] = None
+
+        elif arg_type == "int":
+            values[dest] = int(
+                st.number_input(
+                    label,
+                    value=int(default),
+                    step=1,
+                    help=help_text,
+                    key=key,
+                    min_value=None if min_value is None else int(min_value),
+                )
+            )
+
+        elif arg_type == "float":
+            values[dest] = float(
+                st.number_input(
+                    label,
+                    value=float(default),
+                    step=0.1,
+                    help=help_text,
+                    key=key,
+                    min_value=min_value,
+                )
+            )
+
+        else:
+            values[dest] = st.text_input(
+                label,
+                value="" if default is None else str(default),
+                help=help_text,
+                key=key,
+            )
+
+        # n_workers_int also rejects 0, which a widget minimum cannot exclude
+        if arg["type_name"] == "n_workers_int" and values.get(dest) == 0:
+            errors.append(f"{label}: must be -1 (all processors) or >= 1")
+
+    for message in errors:
+        st.error(message)
+    return values, errors
+
+
 def run_analysis(command):
-    """Run analysis and display all subprocess output inside an expander."""
+    """
+    Run glyco with a live progress bar.
 
-    progress_file = tempfile.NamedTemporaryFile(
-        delete=False, suffix=".json"
-    ).name
+    Progress is read from the JSON file glyco writes to
+    ``GLYCO_PROGRESS_FILE``.
 
-    log_file = tempfile.NamedTemporaryFile(
-        mode="w+", delete=False, suffix=".log"
-    )
+    :param list[str] command: Command line to run.
+    :return: ``(exit code, combined stdout and stderr)``
+    :rtype: tuple[int, str]
+    """
+    progress_file = tempfile.NamedTemporaryFile(delete=False, suffix=".json").name
+    log_file = tempfile.NamedTemporaryFile(mode="w+", delete=False, suffix=".log")
 
     env = os.environ.copy()
     env["GLYCO_PROGRESS_FILE"] = progress_file
@@ -54,62 +257,40 @@ def run_analysis(command):
 
     try:
         process = subprocess.Popen(
-            command,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            env=env,
-            text=True,
+            command, stdout=log_file, stderr=subprocess.STDOUT, env=env, text=True
         )
-
         progress_bar = st.progress(0)
         status_text = st.empty()
-
         while process.poll() is None:
             try:
-                with open(progress_file, "r") as f:
-                    progress_data = json.load(f)
-
-                percent = progress_data.get("percent", 0)
-                progress_bar.progress(
-                    min(int(percent), 100)
-                )
-                status_text.text(
-                    f"Analyzing: {percent:.1f}%"
-                )
-            except (FileNotFoundError, json.JSONDecodeError):
+                with open(progress_file) as f:
+                    percent = int(json.load(f).get("percent", 0))
+                progress_bar.progress(min(percent, 100))
+                status_text.text(f"Analyzing: {percent}%")
+            except (FileNotFoundError, json.JSONDecodeError, ValueError):
                 pass
-
             time.sleep(0.2)
 
         log_file.flush()
         log_file.seek(0)
         output = log_file.read()
-
         progress_bar.empty()
         status_text.empty()
-
-        # All warnings and subprocess output appear here.
-        with st.expander("Analysis Output", expanded=False):
-            st.code(output or "No output.", language="text")
-
-        if process.returncode == 0:
-            st.success("Analysis completed successfully.")
-        else:
-            st.error(
-                f"Analysis failed (exit code {process.returncode})."
-            )
-
+        return process.returncode, output
     finally:
         log_file.close()
-
         for path in (progress_file, log_file.name):
             if os.path.exists(path):
                 os.remove(path)
 
 
 def remove_file(path):
-    """Remove a temporary file if it exists."""
+    """
+    Remove a temporary file if it exists (errors are ignored).
 
+    :param path: File path, or None.
+    :type path: str or None
+    """
     if path and os.path.exists(path):
         try:
             os.unlink(path)
@@ -117,713 +298,339 @@ def remove_file(path):
             pass
 
 
+def _remove_tree_at_exit(path):
+    """
+    Remove a temporary directory when the Streamlit server process exits.
+
+    :param str path: Directory to remove.
+    """
+    atexit.register(shutil.rmtree, path, ignore_errors=True)
+
+
 def clear_files():
-    """Remove files associated with the current Universe."""
-
+    """Remove the files of the current Universe and forget it."""
     remove_file(st.session_state.topology_path)
-
     for path in st.session_state.trajectory_paths:
         remove_file(path)
-
     st.session_state.topology_path = None
     st.session_state.trajectory_paths = []
     st.session_state.u = None
 
 
+def clear_results():
+    """Forget the last run and remove its output directory."""
+    if st.session_state.outdir:
+        shutil.rmtree(st.session_state.outdir, ignore_errors=True)
+    st.session_state.outdir = None
+    st.session_state.last_run = None
+    st.session_state.results_zip = None
+
+
 def save_uploaded_file(uploaded_file):
     """
-    Save a Streamlit UploadedFile to a temporary file.
+    Save an uploaded file to a temporary file, keeping its extension.
 
-    The original filename extension is preserved so that
-    MDAnalysis can determine the appropriate file format.
+    The extension matters: MDAnalysis picks the reader from it.
+
+    :param uploaded_file: Streamlit upload.
+    :type uploaded_file: streamlit.runtime.uploaded_file_manager.UploadedFile
+    :return: Path of the temporary file.
+    :rtype: str
     """
-
-    suffix = os.path.splitext(
-        uploaded_file.name
-    )[1]
-
-    with tempfile.NamedTemporaryFile(
-        suffix=suffix,
-        delete=False,
-    ) as tmp:
-
-        tmp.write(
-            uploaded_file.getvalue()
-        )
-
-        return tmp.name
+    suffix = os.path.splitext(uploaded_file.name)[1]
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(uploaded_file.getvalue())
+    return tmp.name
 
 
 def create_universe(topology_file, trajectory_files):
     """
-    Save topology and trajectories and create an MDAnalysis Universe.
+    Save the uploads and build an MDAnalysis Universe from them.
+
+    Files of a previous Universe are removed first; on failure the new
+    temporary files are removed again.
+
+    :param topology_file: Uploaded topology / structure file.
+    :param trajectory_files: Uploaded trajectory files (may be empty).
+    :return: The new Universe (also stored in the session state).
+    :rtype: MDAnalysis.Universe
     """
-
-    # Remove any previously loaded files
     clear_files()
-
-    # -------------------------------------------------------------
-    # Save topology
-    # -------------------------------------------------------------
-
-    topology_path = save_uploaded_file(
-        topology_file
-    )
-
+    topology_path = save_uploaded_file(topology_file)
     trajectory_paths = []
-
     try:
-
-        # ---------------------------------------------------------
-        # Save trajectories
-        # ---------------------------------------------------------
-
         for trajectory_file in trajectory_files:
-
-            trajectory_path = save_uploaded_file(
-                trajectory_file
-            )
-
-            trajectory_paths.append(
-                trajectory_path
-            )
-
-        # ---------------------------------------------------------
-        # Create Universe
-        # ---------------------------------------------------------
-
-        if trajectory_paths:
-
-            u = mda.Universe(
-                topology_path,
-                trajectory_paths,
-            )
-
-        else:
-
-            u = mda.Universe(
-                topology_path,
-            )
-
-        # ---------------------------------------------------------
-        # Store in session state
-        # ---------------------------------------------------------
-
-        st.session_state.topology_path = topology_path
-        st.session_state.trajectory_paths = trajectory_paths
-        st.session_state.u = u
-
-        return u
-
+            trajectory_paths.append(save_uploaded_file(trajectory_file))
+        u = (
+            mda.Universe(topology_path, trajectory_paths)
+            if trajectory_paths
+            else mda.Universe(topology_path)
+        )
     except Exception:
-
-        # Clean up if Universe creation fails
         remove_file(topology_path)
-
         for path in trajectory_paths:
             remove_file(path)
-
         raise
-
-
-def print_argument_help(parser):
-    """Print CLI help with both short and long argument names."""
-
-    print("\nCommand-line Arguments:\n")
-
-    for action in parser._actions:
-
-        # Skip positional arguments with no option strings
-        if not action.option_strings:
-            continue
-
-        # Display all aliases, e.g. -f, --file
-        flags = ", ".join(action.option_strings)
-
-        # Format help text
-        help_text = action.help or "No description available"
-
-        print(f"{flags:<30} {help_text}")
-
-    print()
-
-
-def get_analysis_arguments(parser):
-    """
-    Extract argparse arguments from an ArgumentParser instance.
-
-    Parameters
-    ----------
-    parser : argparse.ArgumentParser
-        Parser containing the analysis CLI definitions.
-
-    Returns
-    -------
-    list[dict]
-        List of dictionaries describing each argument.
-    """
-
-    arguments = []
-
-    for action in parser._actions:
-
-        # Skip help arguments
-        if isinstance(action, argparse._HelpAction):
-            continue
-
-        # Skip suppressed arguments
-        if action.default == argparse.SUPPRESS:
-            continue
-
-        # Use the first option string, or dest for positional args
-        name = (
-            action.option_strings[0]
-            if action.option_strings
-            else action.dest
-        )
-
-        # Determine action type
-        if isinstance(action, argparse._StoreTrueAction):
-            action_type = "store_true"
-
-        elif isinstance(action, argparse._StoreFalseAction):
-            action_type = "store_false"
-
-        elif isinstance(action, argparse._AppendAction):
-            action_type = "append"
-
-        else:
-            action_type = None
-
-        # Determine argument type
-        arg_type = action.type
-
-        if arg_type is None:
-            arg_type = "str"
-        elif arg_type is int:
-            arg_type = "int"
-        elif arg_type is float:
-            arg_type = "float"
-        elif arg_type is str:
-            arg_type = "str"
-        else:
-            arg_type = getattr(arg_type, "__name__", "str")
-
-
-        argument = {
-            "name": name,
-            "dest": action.dest,
-            "option_strings": action.option_strings,
-            "required": action.required,
-            "default": action.default,
-            "type": arg_type,
-            "action": action_type,
-            "nargs": action.nargs,
-            "choices": action.choices,
-            "help": action.help or "",
-        }
-
-        arguments.append(argument)
-
-    return arguments
-
-
-def create_cli_inputs(
-    parser,
-    exclude=None,
-):
-    """
-    Generate Streamlit widgets from an ArgumentParser instance.
-
-    Parameters
-    ----------
-    parser : argparse.ArgumentParser
-        Parser containing the analysis CLI definitions.
-
-    exclude : list, optional
-        Argument names or destinations to exclude.
-
-    Returns
-    -------
-    dict
-        Dictionary containing user-entered argument values.
-    """
-
-    if exclude is None:
-        exclude = exclude_args
-
-    # Normalize exclusions to argparse destinations
-    excluded = {
-        arg.lstrip("-").replace("-", "_")
-        for arg in exclude
-    }
-
-    arguments = get_analysis_arguments(parser)
-
-    values = {}
-
-    for arg in arguments:
-
-        name = arg["name"]
-        dest = arg["dest"]
-
-        # Skip excluded arguments
-        if dest in excluded or name.lstrip("-") in excluded:
-            continue
-
-        default = arg["default"]
-        arg_type = arg["type"]
-        action = arg["action"]
-        nargs = arg["nargs"]
-        choices = arg["choices"]
-        help_text = arg["help"]
-
-        # Use the longest argument name
-        label = max(
-            arg.get("option_strings", [arg["name"]]),
-            key=len,
-        ).lstrip("-")
-
-        # ----------------------------------------------------
-        # Boolean flags
-        # ----------------------------------------------------
-        if action in ("store_true", "store_false"):
-
-            default_value = action == "store_false"
-
-            if isinstance(default, bool):
-                default_value = default
-
-            values[dest] = st.checkbox(
-                label,
-                value=default_value,
-                help=help_text,
-            )
-
-        # ----------------------------------------------------
-        # Choices
-        # ----------------------------------------------------
-        elif choices is not None:
-
-            choices = list(choices)
-
-            # Preserve an optional None default
-            if default is None and not arg["required"]:
-                choices = [None] + choices
-
-            default_index = (
-                choices.index(default)
-                if default in choices
-                else 0
-            )
-
-            values[dest] = st.selectbox(
-                label,
-                choices,
-                index=default_index,
-                help=help_text,
-            )
-
-        # ----------------------------------------------------
-        # Multiple values
-        # ----------------------------------------------------
-        elif nargs in ("+", "*") or action == "append":
-
-            default_values = []
-
-            if default is not None:
-                if isinstance(default, (list, tuple)):
-                    default_values = list(default)
-                else:
-                    default_values = [default]
-
-            text_value = ", ".join(
-                str(x) for x in default_values
-            )
-
-            user_input = st.text_input(
-                label,
-                value=text_value,
-                help=(
-                    f"{help_text} "
-                    "Enter multiple values separated by commas."
-                ),
-            )
-
-            if user_input.strip():
-
-                raw_values = [
-                    x.strip()
-                    for x in user_input.split(",")
-                    if x.strip()
-                ]
-
-                # Convert values to the expected type
-                if arg_type in ("int", "float"):
-                    converter = int if arg_type == "int" else float
-
-                    values[dest] = [
-                        converter(x) for x in raw_values
-                    ]
-                else:
-                    values[dest] = raw_values
-
-            else:
-                values[dest] = []
-
-        # ----------------------------------------------------
-        # Integer
-        # ----------------------------------------------------
-        elif arg_type == "int":
-
-            default_value = 0 if default is None else int(default)
-
-            values[dest] = st.number_input(
-                label,
-                value=default_value,
-                step=1,
-                help=help_text,
-            )
-
-        # ----------------------------------------------------
-        # Float
-        # ----------------------------------------------------
-        elif arg_type == "float":
-
-            default_value = (
-                0.0 if default is None else float(default)
-            )
-
-            values[dest] = st.number_input(
-                label,
-                value=default_value,
-                step=0.1,
-                help=help_text,
-            )
-
-        # ----------------------------------------------------
-        # String / fallback
-        # ----------------------------------------------------
-        else:
-
-            default_value = (
-                "" if default is None else str(default)
-            )
-
-            values[dest] = st.text_input(
-                label,
-                value=default_value,
-                help=help_text,
-            )
-
-    return values
-
-# ============================================================
-# Helper: Validate Atom Selections
-# ============================================================
+    st.session_state.topology_path = topology_path
+    st.session_state.trajectory_paths = trajectory_paths
+    st.session_state.u = u
+    return u
 
 
 def validate_atom_selections():
-    """Validate protein and glycan selections on widget change."""
+    """
+    Validate the protein and glycan selections against the current Universe.
 
+    Used as the selection widgets' callback and after loading a Universe.
+    Results are stored in ``selection_validation_results`` and
+    ``selections_valid``; the validated strings in ``_validated_prot_sel`` /
+    ``_validated_gly_sel``, so later edits invalidate them.
+    """
     u = st.session_state.get("u")
-
     prot_sel = st.session_state.get("prot_sel", "").strip()
     gly_sel = st.session_state.get("gly_sel", "").strip()
-
-    # Store trimmed selections
     st.session_state["prot_sel"] = prot_sel
     st.session_state["gly_sel"] = gly_sel
-
     if u is None:
         return
 
-    results = {}
-    validation_passed = True
-
-    for name, selection in [
-        ("Protein", prot_sel),
-        ("Glycan", gly_sel),
-    ]:
-
+    results, passed = {}, True
+    for name, selection in (("Protein", prot_sel), ("Glycan", gly_sel)):
         if not selection:
-            results[name] = {
-                "valid": False,
-                "message": "Selection cannot be empty.",
-            }
-            validation_passed = False
+            results[name] = {"valid": False, "message": "Selection cannot be empty."}
+            passed = False
             continue
-
         try:
             atoms = u.select_atoms(selection)
-
-            if len(atoms) == 0:
-                results[name] = {
-                    "valid": False,
-                    "message": f"0 atoms selected\n\n`{selection}`",
-                }
-                validation_passed = False
-
-            else:
-                results[name] = {
-                    "valid": True,
-                    "message": f"{len(atoms):,} atoms",
-                }
-
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             results[name] = {
                 "valid": False,
-                "message": (
-                    f"Invalid selection\n\n"
-                    f"`{selection}`\n\n{e}"
-                ),
+                "message": f"Invalid selection\n\n`{selection}`\n\n{e}",
             }
-            validation_passed = False
+            passed = False
+            continue
+        if len(atoms) == 0:
+            results[name] = {
+                "valid": False,
+                "message": f"0 atoms selected\n\n`{selection}`",
+            }
+            passed = False
+        elif name == "Protein" and len(atoms.select_atoms("name CA")) == 0:
+            results[name] = {
+                "valid": False,
+                "message": f"No CA atoms in\n\n`{selection}`",
+            }
+            passed = False
+        else:
+            results[name] = {"valid": True, "message": f"{len(atoms):,} atoms"}
 
-    # Store validation results
     st.session_state["selection_validation_results"] = results
-    st.session_state["selections_valid"] = validation_passed
-
-    if validation_passed:
+    st.session_state["selections_valid"] = passed
+    if passed:
         st.session_state["_validated_prot_sel"] = prot_sel
         st.session_state["_validated_gly_sel"] = gly_sel
     else:
-        # Clear previously validated selections if validation fails
         st.session_state.pop("_validated_prot_sel", None)
         st.session_state.pop("_validated_gly_sel", None)
+
+
+def zip_directory(path):
+    """
+    All files below ``path`` as ZIP bytes (paths relative to ``path``).
+
+    :param str path: Directory to pack.
+    :rtype: bytes
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(path):
+            for name in files:
+                full = os.path.join(root, name)
+                zf.write(full, os.path.relpath(full, path))
+    return buf.getvalue()
+
+
+def build_command(frame_mode, frames, frame_start, frame_stop, frame_step, cli_inputs):
+    """
+    glyco command line for the current inputs (without ``--outdir``).
+
+    :param str frame_mode: ``'Start / Stop / Step'`` or ``'Frame list'``.
+    :param frames: Frame list (frame-list mode).
+    :param frame_start: Start frame, or None.
+    :param frame_stop: Stop frame, or None.
+    :param frame_step: Step, or None.
+    :param dict cli_inputs: Values from :func:`create_cli_inputs`.
+    :rtype: list[str]
+    """
+    cmd = [*GLYCO_COMMAND, "--top", st.session_state.topology_path]
+    if st.session_state.trajectory_paths:
+        cmd += ["--traj", *st.session_state.trajectory_paths]  # one option, all files
+
+    if frame_mode == "Start / Stop / Step":
+        for flag, value in (
+            ("--start", frame_start),
+            ("--stop", frame_stop),
+            ("--step", frame_step),
+        ):
+            if value is not None:
+                cmd += [flag, str(int(value))]
+    else:
+        cmd += ["--frames", *map(str, frames)]
+
+    cmd += [
+        "--prot-sel",
+        st.session_state.prot_sel,
+        "--gly-sel",
+        st.session_state.gly_sel,
+    ]
+
+    argument_map = {a["dest"]: a for a in get_analysis_arguments(parser)}
+    for dest, value in cli_inputs.items():
+        arg = argument_map.get(dest)
+        if dest in HANDLED_DESTS or arg is None or not arg["option_strings"]:
+            continue
+        option = max(arg["option_strings"], key=len)
+        if arg["action"] == "store_true":
+            if value:
+                cmd.append(option)
+        elif arg["action"] == "store_false":
+            if not value:
+                cmd.append(option)
+        elif isinstance(value, list):
+            if value:
+                cmd += [option, *map(str, value)]
+        elif value is not None and value != "" and value != arg["default"]:
+            cmd += [option, str(value)]
+    return cmd
 
 
 # =====================================================================
 # Session state
 # =====================================================================
 
-if "u" not in st.session_state:
-    st.session_state.u = None
-
-if "topology_path" not in st.session_state:
-    st.session_state.topology_path = None
-
-if "trajectory_paths" not in st.session_state:
-    st.session_state.trajectory_paths = []
+for key, value in {
+    "u": None,
+    "topology_path": None,
+    "trajectory_paths": [],
+    "outdir": None,
+    "results_zip": None,
+    "last_run": None,
+    "prot_sel": "protein",
+    "gly_sel": "",
+}.items():
+    st.session_state.setdefault(key, value)
 
 
 # =====================================================================
 # Application
 # =====================================================================
 
+st.title("GlyCo: Glycan Coverage")
 
-st.title("MDAnalysis Analysis")
-
-
-# =====================================================================
+# ---------------------------------------------------------------------
 # 1. Load files
-# =====================================================================
+# ---------------------------------------------------------------------
 with st.expander("1. Load Structure and Trajectories", expanded=True):
-
     st.write(
-        """
-    Upload an MDAnalysis-compatible topology/structure file and,
-    optionally, one or more trajectory files.
-    """
+        "Upload an MDAnalysis-compatible topology/structure file and, "
+        "optionally, one or more trajectory files."
     )
-
-
     topology_file = st.file_uploader(
         "Topology / structure file",
         key="topology_upload",
-        type=list(mda._PARSERS),
+        type=[k.lower() for k in mda._PARSERS],
     )
-
-
     trajectory_files = st.file_uploader(
         "Trajectory files",
         accept_multiple_files=True,
         key="trajectory_upload",
-        type=list(mda._READERS)
+        type=[k.lower() for k in mda._READERS],
     )
 
+    if topology_file is not None and st.button("Load Universe", type="primary"):
+        try:
+            with st.spinner("Loading MDAnalysis Universe..."):
+                create_universe(topology_file, trajectory_files)
+            clear_results()  # results of the old Universe
+            validate_atom_selections()  # selections against the NEW Universe
+            st.success("Universe loaded successfully.")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Failed to load Universe: {e}")
 
-    # =====================================================================
-    # Create Universe
-    # =====================================================================
+u = st.session_state.u
 
-    if topology_file is not None:
-
-        if st.button(
-            "Load Universe",
-            type="primary",
-        ):
-
-            try:
-
-                with st.spinner(
-                    "Loading MDAnalysis Universe..."
-                ):
-
-                    u = create_universe(
-                        topology_file,
-                        trajectory_files,
-                    )
-
-                st.success(
-                    "Universe loaded successfully."
-                )
-
-            except Exception as e:
-
-                st.error(
-                    f"Failed to load Universe: {e}"
-                )
-
-
-# =====================================================================
+# ---------------------------------------------------------------------
 # 2. Universe information
-# =====================================================================
-
-if st.session_state.u is not None:
-
-    u = st.session_state.u
-
+# ---------------------------------------------------------------------
+if u is not None:
     with st.expander("2. Universe Information", expanded=True):
-
         col1, col2, col3, col4 = st.columns(4)
-
-        col1.metric(
-            "Atoms",
-            f"{u.atoms.n_atoms:,}",
-        )
-
-        col2.metric(
-            "Residues",
-            f"{len(u.residues):,}",
-        )
-
-        col3.metric(
-            "Segments",
-            f"{len(u.segments):,}",
-        )
-
-        col4.metric(
-            "Frames",
-            f"{len(u.trajectory):,}",
-        )
-
-        # -------------------------------------------------------------
-        # Trajectory information
-        # -------------------------------------------------------------
-
+        col1.metric("Atoms", f"{u.atoms.n_atoms:,}")
+        col2.metric("Residues", f"{len(u.residues):,}")
+        col3.metric("Segments", f"{len(u.segments):,}")
+        col4.metric("Frames", f"{len(u.trajectory):,}")
         if st.session_state.trajectory_paths:
-
             st.subheader("Trajectory Information")
-
             col1, col2 = st.columns(2)
-
             col1.metric(
-                "Number of trajectories",
-                len(st.session_state.trajectory_paths),
+                "Number of trajectories", len(st.session_state.trajectory_paths)
             )
+            col2.metric("Total frames", f"{len(u.trajectory):,}")
+            st.write(f"**Timestep:** {round(u.trajectory.dt, 2)} ps")
+            st.write(f"**Total time:** {round(u.trajectory.totaltime, 2)} ps")
 
-            col2.metric(
-                "Total frames",
-                f"{len(u.trajectory):,}",
-            )
-
-            st.write(
-                f"**Timestep:** {round(u.trajectory.dt, 2)} ps"
-            )
-
-            st.write(
-                f"**Total time:** {round(u.trajectory.totaltime, 2)} ps"
-            )
-
-
-# ============================================================
-# 3. Atom Selections
-# ============================================================
-
-if st.session_state.get("u") is not None:
-
+# ---------------------------------------------------------------------
+# 3. Atom selections
+# ---------------------------------------------------------------------
+if u is not None:
     with st.expander("3. Atom Selections", expanded=True):
-
-        # Do not initialize prot_sel or gly_sel with default values.
-        # Placeholder text is displayed until the user enters a selection.
-
         col1, col2 = st.columns(2)
-
         with col1:
             st.text_area(
                 "Protein Selection",
                 key="prot_sel",
                 height=100,
                 placeholder="protein",
-                help=(
-                    "MDAnalysis selection string for the protein. "
-                    "Examples: 'protein', 'protein and name CA'"
-                ),
                 on_change=validate_atom_selections,
+                help="MDAnalysis selection of the protein residues "
+                "(each needs one CA atom), e.g. 'protein'",
             )
-
         with col2:
             st.text_area(
                 "Glycan Selection",
                 key="gly_sel",
                 height=100,
                 placeholder="resname NAG",
-                help=(
-                    "MDAnalysis selection string for the glycan. "
-                    "Examples: 'resname NAG', 'resname MAN BMA'"
-                ),
                 on_change=validate_atom_selections,
+                help="MDAnalysis selection of the glycan atoms, e.g. 'resname NAG BMA'",
             )
 
-        # ========================================================
-        # Display Validation Results
-        # ========================================================
-
-        results = st.session_state.get(
-            "selection_validation_results"
-        )
-
+        results = st.session_state.get("selection_validation_results")
         if results:
-
             col1, col2 = st.columns(2)
-
-            for col, name in [
-                (col1, "Protein"),
-                (col2, "Glycan"),
-            ]:
-
+            for col, name in ((col1, "Protein"), (col2, "Glycan")):
                 with col:
                     st.markdown(f"#### {name} Selection")
-
                     result = results.get(name)
-
-                    if result:
-                        if result["valid"]:
-                            st.success(
-                                f"Valid\n\n**{result['message']}**"
-                            )
-                        else:
-                            st.error(result["message"])
-
-            # Overall validation status
+                    if result and result["valid"]:
+                        st.success(f"Valid\n\n**{result['message']}**")
+                    elif result:
+                        st.error(result["message"])
             if st.session_state.get("selections_valid", False):
-                st.success(
-                    "✓ Both selections are valid and contain atoms."
-                )
+                st.success("✓ Both selections are valid and contain atoms.")
             else:
-                st.error(
-                    "✗ One or more selections must be corrected."
-                )
+                st.error("✗ One or more selections must be corrected.")
 
-# ============================================================
-# 4. Trajectory Options
-# ============================================================
+# ---------------------------------------------------------------------
+# 4. Trajectory options
+# ---------------------------------------------------------------------
+frames = None
+frame_mode = None
+frame_start = frame_stop = frame_step = None
 
-if st.session_state.u is not None:
-
+if u is not None:
+    n_frames = len(u.trajectory)
     with st.expander("4. Trajectory Options", expanded=True):
-
         frame_mode = st.radio(
             "Frame selection method",
             options=["Start / Stop / Step", "Frame list"],
@@ -831,125 +638,73 @@ if st.session_state.u is not None:
             key="frame_mode",
         )
 
-        frames = None
-        frame_start = None
-        frame_stop = None
-        frame_step = None
-
         if frame_mode == "Start / Stop / Step":
-
             col1, col2, col3 = st.columns(3)
-
             with col1:
                 frame_start = st.number_input(
                     "Start (blank = beginning)",
                     min_value=0,
+                    max_value=n_frames - 1,
                     value=None,
                     step=1,
-                    max_value=len(st.session_state.u.trajectory)-1,
                     placeholder="0",
                 )
-
             with col2:
                 frame_stop = st.number_input(
                     "Stop (exclusive; blank = end)",
-                    min_value=-len(st.session_state.u.trajectory),
+                    min_value=-n_frames,
+                    max_value=n_frames,
                     value=None,
                     step=1,
-                    max_value=len(st.session_state.u.trajectory),
-                    placeholder=str(len(st.session_state.u.trajectory)),
+                    placeholder=str(n_frames),
                 )
-
             with col3:
                 frame_step = st.number_input(
-                    "Step  (blank = every frame)",
+                    "Step (blank = every frame)",
                     min_value=1,
                     value=None,
                     step=1,
                     placeholder="1",
                 )
 
-            # None means use the start of the trajectory
-            effective_start = (
-                0
-                if frame_start is None
-                else frame_start
-            )
-
-            # None means use the end of the trajectory
-            effective_stop = (
-                len(st.session_state.u.trajectory)
-                if frame_stop is None
-                else frame_stop
-            )
-
-            # None means use every frame
-            effective_step = (
-                1
-                if frame_step is None
-                else frame_step
-            )
-
-            if effective_stop <= effective_start:
-                st.error("Stop must be greater than Start.")
-                frames = None
+            # same semantics as Python slicing, so negative stops work
+            selected = range(n_frames)[slice(frame_start, frame_stop, frame_step)]
+            if len(selected) == 0:
+                st.error("This start / stop / step selects no frames.")
             else:
-                frames = slice(
-                    frame_start,
-                    frame_stop,
-                    frame_step,
-                )
-
+                frames = slice(frame_start, frame_stop, frame_step)
+                st.caption(f"{len(selected)} frame(s) selected")
         else:
             frame_text = st.text_area(
                 "Frames",
-                value="0, 10, 20, 50, 100",
-                help="Enter frame numbers separated by commas, spaces, or new lines.",
+                value="0",
+                help="Frame numbers separated by commas, spaces or new lines.",
             )
-
             try:
-                tokens = frame_text.replace(",", " ").split()
-                frames = sorted(set(int(x) for x in tokens))
-
-                n_frames = len(st.session_state.u.trajectory)
-
-                if any(f < 0 or f >= n_frames for f in frames):
-                    st.error(f"Frames must be between 0 and {n_frames - 1}.")
-                    frames = None
-
-                elif not frames:
+                frames = sorted({int(x) for x in frame_text.replace(",", " ").split()})
+                if not frames:
                     st.error("Enter at least one frame.")
                     frames = None
-
+                elif any(f < 0 or f >= n_frames for f in frames):
+                    st.error(f"Frames must be between 0 and {n_frames - 1}.")
+                    frames = None
             except ValueError:
                 st.error("Invalid frame list.")
                 frames = None
 
-
-# =====================================================================
-# 5. Specify Parameters
-# =====================================================================
-
-# if st.session_state.u is not None:
-    # cli_args = create_cli_inputs(ANALYSIS_SCRIPT)
-if st.session_state.u is not None:
-
+# ---------------------------------------------------------------------
+# 5. Analysis parameters
+# ---------------------------------------------------------------------
+cli_inputs, cli_errors = {}, []
+if u is not None:
     with st.expander("5. Analysis Parameters", expanded=True):
-        cli_inputs = create_cli_inputs(
-            parser,
-    )
+        cli_inputs, cli_errors = create_cli_inputs(parser)
 
-# =====================================================================
-# 6. Run Analysis
-# =====================================================================
-
-if st.session_state.get("u") is not None:
-
+# ---------------------------------------------------------------------
+# 6. Run analysis
+# ---------------------------------------------------------------------
+if u is not None:
     st.header("6. Run Analysis")
-
-    # -------------------------------------------------------------
-    # Check that selections have been validated
-    # -------------------------------------------------------------
 
     selections_valid = (
         st.session_state.get("selections_valid", False)
@@ -958,241 +713,74 @@ if st.session_state.get("u") is not None:
         and st.session_state.get("gly_sel", "").strip()
         == st.session_state.get("_validated_gly_sel")
     )
-
     if not selections_valid:
         st.warning(
-            "Enter valid protein and glycan selections before "
-            "running the analysis."
+            "Enter valid protein and glycan selections before running the analysis."
         )
-
-    # -------------------------------------------------------------
-    # Check that frame selection is valid
-    # -------------------------------------------------------------
-
-    frames_valid = (
-        frames is not None
-        and len(st.session_state.u.trajectory[frames]) > 0
-    )
-
+    frames_valid = frames is not None
     if not frames_valid:
         st.warning(
-            "A valid set of trajectory frames must be selected "
-            "before running the analysis."
+            "A valid set of trajectory frames must be selected before "
+            "running the analysis."
         )
+    if cli_errors:
+        st.warning("Fix the analysis parameters in section 5 before running.")
 
-    # -------------------------------------------------------------
-    # Analysis button
-    # -------------------------------------------------------------
-
-    run_clicked = st.button(
-        "Run Analysis",
-        type="primary",
-        use_container_width=True,
-        disabled=not (selections_valid and frames_valid),
-    )
-
-    if run_clicked:
-
-        # =========================================================
-        # Retrieve inputs
-        # =========================================================
-
-        topology_path = st.session_state.get("topology_path")
-
-        trajectory_paths = st.session_state.get(
-            "trajectory_paths", []
-        )
-
-        prot_sel = st.session_state.get("prot_sel", "").strip()
-        gly_sel = st.session_state.get("gly_sel", "").strip()
-
-        # =========================================================
-        # Final validation
-        # =========================================================
-
-        if not topology_path or not os.path.exists(topology_path):
-            st.error("Topology file is missing or no longer exists.")
-            st.stop()
-
-        for trajectory_path in trajectory_paths:
-            if not os.path.exists(trajectory_path):
-                st.error(
-                    f"Trajectory file no longer exists:\n"
-                    f"{trajectory_path}"
-                )
-                st.stop()
-
-        if not selections_valid:
-            st.error("Atom selections must be validated.")
-            st.stop()
-
-        if not frames_valid:
-            st.error("No valid trajectory frames were selected.")
-            st.stop()
-
-        # =========================================================
-        # Build command
-        # =========================================================
-
-        cmd = [
-            sys.executable,
-            ANALYSIS_SCRIPT,
+    ready = selections_valid and frames_valid and not cli_errors
+    if st.button(
+        "Run Analysis", type="primary", use_container_width=True, disabled=not ready
+    ):
+        missing = [
+            p
+            for p in [
+                st.session_state.topology_path,
+                *st.session_state.trajectory_paths,
+            ]
+            if not p or not os.path.exists(p)
         ]
+        if missing:
+            st.error(f"Input file(s) no longer exist: {missing}. Reload the Universe.")
+            st.stop()
 
-        # ---------------------------------------------------------
-        # Retrieve parser argument definitions
-        # ---------------------------------------------------------
+        cmd = build_command(
+            frame_mode, frames, frame_start, frame_stop, frame_step, cli_inputs
+        )
 
-        arguments = get_analysis_arguments(parser)
-
-        # Map destinations to their actual CLI option strings
-        argument_map = {
-            arg["dest"]: arg
-            for arg in arguments
-        }
-
-        # ---------------------------------------------------------
-        # Topology
-        # ---------------------------------------------------------
-
-        cmd.extend([
-            "--top",
-            topology_path,
-        ])
-
-        # ---------------------------------------------------------
-        # Trajectories
-        # ---------------------------------------------------------
-
-        for trajectory_path in trajectory_paths:
-            cmd.extend([
-                "--traj",
-                trajectory_path,
-            ])
-
-        # ---------------------------------------------------------
-        # Frames
-        # ---------------------------------------------------------
-
-        if frame_mode == "Start / Stop / Step":
-
-            # Only pass --start, --stop, --step if the user specified it
-            if frame_start is not None:
-                cmd.extend(["--start", str(frame_start)])
-
-            if frame_stop is not None:
-                cmd.extend(["--stop", str(frame_stop)])
-
-            if frame_step is not None:
-                cmd.extend(["--step", str(frame_step)])
-
-
-        else:
-            cmd.append("--frames")
-            cmd.extend(str(frame) for frame in frames)
-
-        # ---------------------------------------------------------
-        # Atom selections
-        # ---------------------------------------------------------
-
-        cmd.extend(["--prot-sel", prot_sel])
-        cmd.extend(["--gly-sel", gly_sel])
-
-        # ---------------------------------------------------------
-        # Automatically generated CLI parameters
-        # ---------------------------------------------------------
-
-        for dest, value in cli_inputs.items():
-
-            # Skip values handled separately above
-            if dest in {
-                "top",
-                "traj",
-                "frames",
-                "prot_sel",
-                "gly_sel",
-            }:
-                continue
-
-            # Skip empty values
-            if value is None or value == "":
-                continue
-
-            # Retrieve the actual argparse definition
-            arg = argument_map.get(dest)
-
-            if arg is None:
-                continue
-
-            option_strings = arg.get("option_strings", [])
-
-            if not option_strings:
-                continue
-
-            # Use the longest option string (e.g. --output-file)
-            option = max(option_strings, key=len)
-
-            action = arg["action"]
-            default = arg["default"]
-
-            # -----------------------------------------------------
-            # Boolean flags
-            # -----------------------------------------------------
-
-            if action == "store_true":
-                if value:
-                    cmd.append(option)
-
-            elif action == "store_false":
-                if not value:
-                    cmd.append(option)
-
-            # -----------------------------------------------------
-            # Multiple values
-            # -----------------------------------------------------
-
-            elif isinstance(value, list):
-
-                if value:
-                    cmd.append(option)
-                    cmd.extend(str(x) for x in value)
-
-            # -----------------------------------------------------
-            # Standard arguments
-            # -----------------------------------------------------
-
-            else:
-
-                # Only include values that differ from the default
-                if value != default:
-                    cmd.extend([
-                        option,
-                        str(value),
-                    ])
-
-
-        output_box = st.empty()
-        output_lines = []
+        # fresh output directory for every run
+        clear_results()
+        st.session_state.outdir = tempfile.mkdtemp(prefix="glyco_")
+        _remove_tree_at_exit(st.session_state.outdir)
+        cmd += ["--outdir", st.session_state.outdir, "--force"]
 
         try:
+            returncode, output = run_analysis(cmd)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Failed to run glyco:\n\n{e}")
+            st.stop()
+        st.session_state.last_run = {
+            "command": shlex.join(cmd),
+            "returncode": returncode,
+            "output": output,
+        }
+        st.session_state.results_zip = (
+            zip_directory(st.session_state.outdir) if returncode == 0 else None
+        )
 
-            # =========================================================
-            # Display command
-            # =========================================================
-
-            with st.expander("Command", expanded=False):
-                st.code(shlex.join(cmd), language="bash")
-
-            # =========================================================
-            # Run analysis and display live progress
-            # =========================================================
-
-            # st.subheader("Analysis Output")
-
-            return_code = run_analysis(cmd)
-
-        except Exception as e:
-
-            st.error(
-                f"Failed to run analysis script:\n\n{e}"
-            )
+    # ---- results (kept across reruns, e.g. after clicking download) ----
+    last = st.session_state.last_run
+    if last:
+        with st.expander("Command", expanded=False):
+            st.code(last["command"], language="bash")
+        with st.expander("Analysis Output", expanded=False):
+            st.code(last["output"] or "No output.", language="text")
+        if last["returncode"] == 0:
+            st.success("Analysis completed successfully.")
+        else:
+            st.error(f"Analysis failed (exit code {last['returncode']}).")
+    if st.session_state.results_zip:
+        st.download_button(
+            "Download results (ZIP)",
+            st.session_state.results_zip,
+            file_name="glyco_results.zip",
+            mime="application/zip",
+        )

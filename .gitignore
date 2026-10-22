@@ -57,7 +57,7 @@ coverage.xml
 .pytest_cache/
 cover/
 *.json
-*.csv 
+*.csv
 
 # Translations
 *.mo
@@ -238,3 +238,6 @@ __marimo__/
 
 # poetry
 poetry.lock
+
+# mdanalysis offsets for test files
+*offsets*.npz

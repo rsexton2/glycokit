@@ -7,11 +7,6 @@ function also collects help from the subparsers and provides it at the command
 line.
 """
 
-from importlib.metadata import version
-import argparse
-import subprocess
-import importlib
-import sys
 
 # __version__ = version("basicrta")
 
@@ -19,8 +14,9 @@ import sys
 # can easily add functionality to cli as modules are added
 # commands = ['contacts', 'gibbs', 'cluster', 'combine', 'kinetics', 'assess']
 
+
 def main():
-    """ This module provides the functionality for a command line interface for
+    """This module provides the functionality for a command line interface for
     glyco scripts.
     The scripts available to the cli are:
 
@@ -31,29 +27,8 @@ def main():
     from parsers import base_parser
 
     parser = base_parser()
-    print(f'parser: {parser}')
-    # subparsers = parser.add_subparsers(help="""step in the glyco workflow to
-                                    #    execute""")
+    print(f"parser: {parser}")
 
-    # collect parser from each script in `commands`
-    # for command in commands:
-    #     subparser = importlib.import_module(f"glyco.{command}").get_parser()
-    #     subparsers.add_parser(f'{command}', parents=[subparser], add_help=True,
-    #                           description=subparser.description,
-    #                           conflict_handler='resolve',
-    #                           formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    #                           help=subparser.description)
-
-    # print subparser help if no arguments given
-    # if len(sys.argv) == 2 and sys.argv[1] in commands:
-        # subparsers.choices[f'{sys.argv[1]}'].print_help()
-        # sys.exit()
-
-    # print basicrta help if no subcommand given
-    # parser.parse_args(args=None if sys.argv[1:] else ['--help'])
-
-    # execute basicrta script
-    # importlib.import_module(f"glyco").main()
 
 if __name__ == "__main__":
     main()

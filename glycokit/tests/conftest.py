@@ -2,8 +2,11 @@
 pytest configuration for glycokit tests with user-supplied inputs.
 
 Shared parameters resolve as: pytest option > GLYCO_COMPARE_<NAME> > built-in default.
-compare.py reads the same environment variables, and the legacy test also
-passes the resolved values to it explicitly.
+compare.py reads the same environment variables, and the legacy tests also
+pass the resolved values to it explicitly.
+
+Test modes (--glyco-modes): default (vdW), default-cylinder, v2, v1; see
+glyco_cases.MODE_SPECS for the glyco --mode / --blocking of each.
 
 Examples (use '=' for options whose value is a path):
     pytest --glyco-structure=a.pdb
@@ -39,6 +42,7 @@ except ImportError:                   # tests/ as a plain directory
     import glyco_cases
 
 MODES = glyco_cases.MODES
+MODE_SPECS = glyco_cases.MODE_SPECS
 ENV_PREFIX = "GLYCO_COMPARE_"
 
 # shared by glycokit and compare.py:
@@ -53,15 +57,9 @@ SHARED = {
     "ac": ("area cutoff (--ac)", "AREA_CUTOFF", float,
            "area_cutoff", "--ac", "--area-cutoff"),
     "cr": ("cylinder radius (--cr)", "CYLINDER_RADIUS", float,
-           "radius", "--cr", "--cylinder-radius"),
-    "pr": ("probe radius (--pr)", "PROBE", float,
-           "probe", "--pr", "--probe"),
-}
-
-# glycokit only (the legacy tools have no equivalent): option -> (keyword, flag)
-GLYCO_ONLY = {
-    "--glyco-bs": ("block_sel", "--bs"),
-    "--glyco-sasa-env": ("sasa_env", "--sasa-env"),
+           "cylinder_radius", "--cr", "--cylinder-radius"),
+    "pr": ("FreeSASA probe radius (--pr)", "PROBE", float,
+           "sasa_probe", "--pr", "--probe"),
 }
 
 # keys accepted by --glyco-compare-vary -> (type, compare.py flag)
@@ -70,17 +68,18 @@ VARY_KEYS = {
     "ac": (float, "--area-cutoff"),
     "cr": (float, "--cylinder-radius"),
     "pr": (float, "--probe"),
-    "box_workers": (int, "--box-workers"),
+    "n_workers": (int, "--n-workers"),
     "sasa_tolerance": (float, "--sasa-tolerance"),
 }
 
+# (short id, compare.py check label); labels must match compare.py
 LEGACY_CHECKS = (
-    ("v1-counts",   "compat versus original GLYCO counts"),
-    ("v1-sasa",     "compat versus original GLYCO SASA"),
-    ("v1-excluded", "compat versus original GLYCO excluded atoms"),
-    ("v2-counts",   "compat-v2 versus GLYCO-2 counts"),
-    ("v2-sasa",     "compat-v2 versus GLYCO-2 SASA"),
-    ("v2-excluded", "compat-v2 versus GLYCO-2 excluded atoms"),
+    ("v1-counts",   "v1 versus original GLYCO counts"),
+    ("v1-sasa",     "v1 versus original GLYCO SASA"),
+    ("v1-excluded", "v1 versus original GLYCO excluded atoms"),
+    ("v2-counts",   "v2 versus GLYCO-2 counts"),
+    ("v2-sasa",     "v2 versus GLYCO-2 SASA"),
+    ("v2-excluded", "v2 versus GLYCO-2 excluded atoms"),
 )
 
 CASE_ONLY = {"bs": ("block_sel", "--bs"),
@@ -171,8 +170,9 @@ def pytest_addoption(parser):
     g.addoption("--glyco-legacy-glycans", default=None, metavar="NAMES",
                 help=f"comma-separated glycan names for the legacy tools; default "
                      f"${ENV_PREFIX}GLYCANS, else derived from 'resname ...' in --glyco-gs")
-    g.addoption("--glyco-box-workers", type=int, default=None,
-                help=f"--box-workers; default ${ENV_PREFIX}BOX_WORKERS, else 2")
+    g.addoption("--glyco-n-workers", type=int, default=None,
+                help=f"glyco -j/--n-workers (-1 = all processors); default "
+                     f"${ENV_PREFIX}N_WORKERS, else 2")
 
     g.addoption("--glyco-modes", default=",".join(MODES),
                 help="comma-separated subset of: " + ", ".join(MODES))
@@ -211,8 +211,8 @@ def pytest_addoption(parser):
                 help="timeout per compare.py run in seconds")
     c.addoption("--glyco-legacy-reuse", action="store_true",
                 help="reuse compare.py reports from earlier runs (pytest "
-                "cache) when the PDB, parameters, compare.py and the glyco "
-                "module are unchanged")
+                     "cache) when the PDB, parameters, compare.py and the glyco "
+                     "module are unchanged")
 
 
 # --------------------------------------------------------------------------
@@ -265,12 +265,12 @@ def _resolve_settings(config):
         m = re.fullmatch(r"\s*resname\s+([\w\s]+?)\s*", values["gs"])
         names = tuple(m.group(1).split()) if m else ()
 
-    box_workers = opt("--glyco-box-workers")
-    if box_workers is None:
-        box_workers = _env("BOX_WORKERS", int, 2)
-    if box_workers < 1:
-        raise pytest.UsageError("box workers must be >= 1")
-    return values, names, box_workers
+    n_workers = opt("--glyco-n-workers")
+    if n_workers is None:
+        n_workers = _env("N_WORKERS", int, 2)
+    if n_workers != -1 and n_workers < 1:
+        raise pytest.UsageError("n_workers must be -1 or >= 1")
+    return values, names, n_workers
 
 
 def _parse_vary(specs):
@@ -295,7 +295,6 @@ def _parse_vary(specs):
                 raise pytest.UsageError(f"--glyco-compare-vary {part!r}: no values")
             axes[key] = list(dict.fromkeys(values))
     return axes
-
 
 
 def _attach_case_settings(config):
@@ -342,11 +341,10 @@ def resolve_case_settings(config, case):
     return s
 
 
-
 def pytest_configure(config):
     for line in (
         "glyco_kind(*kinds): restrict a test to 'structure' and/or 'trajectory' inputs",
-        "glyco_modes(*modes): restrict a test to some counting modes",
+        "glyco_modes(*modes): restrict a test to some test modes",
         "slow: expensive test",
         "legacy: runs the legacy GLYCO tools through compare.py",
     ):
@@ -355,12 +353,13 @@ def pytest_configure(config):
     modes = [m.strip() for m in config.getoption("--glyco-modes").split(",") if m.strip()]
     unknown = sorted(set(modes) - set(MODES))
     if unknown:
-        raise pytest.UsageError(f"--glyco-modes: unknown mode(s) {unknown}")
+        raise pytest.UsageError(f"--glyco-modes: unknown mode(s) {unknown}; "
+                                f"choose from {list(MODES)}")
     config.glyco_modes = modes
     config.glyco_cases = _collect_cases(config)
 
     (config.glyco_settings, config.glyco_legacy_glycans,
-     config.glyco_box_workers) = _resolve_settings(config)
+     config.glyco_n_workers) = _resolve_settings(config)
     _attach_case_settings(config)
 
     script = config.getoption("--glyco-compare") or _env("SCRIPT")
@@ -377,7 +376,8 @@ def pytest_configure(config):
 def pytest_report_header(config):
     s = config.glyco_settings
     shown = ", ".join(f"{k}={s[k]!r}" for k in SHARED if s[k] is not None)
-    lines = [f"glycokit settings: {shown}, box_workers={config.glyco_box_workers}"]
+    lines = [f"glycokit settings: {shown}, n_workers={config.glyco_n_workers}, "
+             f"modes={config.glyco_modes}"]
 
     if not config.glyco_cases:
         lines.append("glycokit: no structures given (--glyco-structure, --glyco-indir "
@@ -440,7 +440,6 @@ def pytest_generate_tests(metafunc):
                   for values in itertools.product(*(axes[k] for k in keys))]
         ids = ["-".join(f"{k}={v}" for k, v in c.items()) or "base" for c in combos]
         metafunc.parametrize("compare_params", combos, ids=ids)
-
 
 
 # --------------------------------------------------------------------------
@@ -518,7 +517,6 @@ def pytest_sessionfinish(session):
     session.config.cache.set(_DUR_KEY, stored)
 
 
-
 # --------------------------------------------------------------------------
 # fixtures
 # --------------------------------------------------------------------------
@@ -574,7 +572,7 @@ def compare_base_args(pytestconfig, case_settings):
                 args += [spec[5], str(s[key])]
         if s["legacy_glycans"]:
             args += ["--glycans", ",".join(s["legacy_glycans"])]
-        args += ["--box-workers", str(pytestconfig.glyco_box_workers)]
+        args += ["--n-workers", str(pytestconfig.glyco_n_workers)]
         if not pytestconfig.getoption("--glyco-compare-installed"):
             module = pytestconfig.getoption("--glyco-module")
             args += ["--glyco-command", shlex.join([sys.executable, "-m", module])]
@@ -600,25 +598,33 @@ def _default_frames(n_frames, max_frames):
 
 @pytest.fixture(scope="session")
 def runner(glyco, glyco_params, pytestconfig, tmp_path_factory):
-    """runner(case, mode, frames="auto", universe=None, cache=True, **overrides) -> Run"""
+    """runner(case, mode, frames="auto", universe=None, cache=True, **overrides) -> Run
+
+    ``mode`` is a test mode (see glyco_cases.MODE_SPECS); ``overrides`` are
+    GlycoAnalysis parameters (e.g. ``n_workers=1``).
+    """
     results = {}
     max_frames = pytestconfig.getoption("--glyco-max-frames")
-    box_workers = pytestconfig.glyco_box_workers
+    n_workers = pytestconfig.glyco_n_workers
 
     def run(case, mode, frames="auto", universe=None, cache=True, **overrides):
-        params = glyco_params(case)
+        glyco_mode, blocking = MODE_SPECS[mode]
+        kwargs = {**glyco_params(case), "write_excluded": True,
+                  "mode": glyco_mode, "blocking": blocking,
+                  "n_workers": n_workers, **overrides}
         frames_key = frames if frames == "auto" or frames is None else tuple(frames)
-        key = (case, mode, frames_key, tuple(sorted(overrides.items())))
+        # key from the EFFECTIVE parameters: equivalent calls share one run
+        key = (case, frames_key, tuple(sorted(kwargs.items())))
         if cache and universe is None and key in results:
             return results[key]
 
         u = universe if universe is not None else glyco.load_universe(
             case.top, list(case.traj) or None)
 
-        if (mode != "default" and not _has_record_types(glyco, u)
-                and "sasa_env" not in params):
-            pytest.skip(f"{mode} needs PDB record types for its FreeSASA atom set; "
-                        "this topology has none (give --glyco-sasa-env)")
+        if (glyco_mode != "default" and not _has_record_types(glyco, u)
+                and "sasa_env" not in kwargs):
+            pytest.skip(f"--mode {glyco_mode} needs PDB record types for its FreeSASA "
+                        "atom set; this topology has none (give --glyco-sasa-env)")
 
         if frames == "auto":
             frames = _default_frames(u.trajectory.n_frames, max_frames)
@@ -626,10 +632,7 @@ def runner(glyco, glyco_params, pytestconfig, tmp_path_factory):
 
         name = re.sub(r"[^\w.-]", "_", f"{case.id}-{mode}")[:60]
         outdir = tmp_path_factory.mktemp(name)
-
-        kwargs = {**params, "outdir": str(outdir), "write_excluded": True,
-                  "compat": mode == "compat", "compat_v2": mode == "compat-v2",
-                  "box_workers": box_workers, **overrides}
+        kwargs["outdir"] = str(outdir)                 # add, don't rebuild
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -637,13 +640,11 @@ def runner(glyco, glyco_params, pytestconfig, tmp_path_factory):
             analysis.run(frames=frames)
 
         result = Run(analysis, outdir, frames, [str(w.message) for w in caught])
-
         if universe is None:
             results[key] = result
         return result
 
     return run
-
 
 
 def _file_digest(path, h, block=1 << 20):
@@ -714,8 +715,8 @@ def legacy_report(pytestconfig, compare_base_args, case_settings,
             summary = tmp_path_factory.mktemp("legacy") / "summary.json"
             try:
                 proc = subprocess.run(argv + ["--json-summary", str(summary)],
-                                      check=False, cwd=os.path.dirname(script), capture_output=True,
-                                      text=True, timeout=timeout)
+                                      check=False, cwd=os.path.dirname(script),
+                                      capture_output=True, text=True, timeout=timeout)
                 returncode, output = proc.returncode, proc.stdout + proc.stderr
             except subprocess.TimeoutExpired as exc:
                 returncode = None
@@ -741,7 +742,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not results:
         return
     tr = terminalreporter
-    tr.section("glycokit --compat / --compat-v2 versus GLYCO v1 / GLYCO-2")
+    tr.section("glyco --mode v1 / v2 versus GLYCO v1 / GLYCO-2")
     width = max(len(f"{c} [{p}]") for c, p in results) + 2
     tr.write_line(f"{'structure':<{width}}" + "".join(f"{s:>13}" for s, _ in LEGACY_CHECKS))
     for (case_id, params_id), r in sorted(results.items()):

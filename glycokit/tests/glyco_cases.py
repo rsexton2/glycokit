@@ -2,9 +2,9 @@
 Per-structure settings for the glycokit tests.
 
 Sources, later wins:
-  1. global settings (pytest options > GLYCO_COMPARE_* > built-in)
-  2. every [[case]] entry of the --glyco-cases file whose `match` fits, in file order
-  3. a sidecar file <structure>.glyco.toml
+1. global settings (pytest options > GLYCO_COMPARE_* > built-in)
+2. every [[case]] entry of the --glyco-cases file whose `match` fits, in file order
+3. a sidecar file <structure>.glyco.toml
 """
 import fnmatch
 import json
@@ -15,7 +15,14 @@ from pathlib import Path
 
 import tomllib
 
-MODES = ("default", "compat-v2", "compat")
+# Test mode -> (glyco --mode, glyco --blocking). None: the mode's only test.
+MODE_SPECS = {
+    "default": ("default", "vdw"),
+    "default-cylinder": ("default", "cylinder"),
+    "v2": ("v2", None),
+    "v1": ("v1", None),
+}
+MODES = tuple(MODE_SPECS)
 SIDECAR_SUFFIX = ".glyco.toml"
 
 

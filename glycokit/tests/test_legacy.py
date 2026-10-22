@@ -1,5 +1,5 @@
 """
-glycokit --compat / --compat-v2 versus GLYCO v1 / GLYCO-2, one test per structure
+glyco --mode v1 / --mode v2 versus GLYCO v1 / GLYCO-2, one test per structure
 and gating check. Structures come from --glyco-structure / --glyco-indir.
 """
 import pytest
@@ -24,6 +24,8 @@ def _format_details(details, limit=10):
 def test_legacy_run_completes(case, compare_params, legacy_report):
     """compare.py (all four programs) ran to completion and wrote a summary."""
     r = legacy_report(case, compare_params)
+    if r.returncode is None:
+        pytest.fail(f"compare.py timed out\n{r.tail()}", pytrace=False)
     if r.report is None:
         pytest.fail(f"compare.py did not finish (exit code {r.returncode})\n{r.tail()}",
                     pytrace=False)
