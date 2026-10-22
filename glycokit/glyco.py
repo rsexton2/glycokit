@@ -3,13 +3,18 @@
 """
 glyco: GlyCo (GLYcan COverage) of protein surface residues (glycokit).
 
-Counting modes (``--mode`` / ``--blocking``)
-    default/vdw       heavy-atom starts (per-residue union), float64 pair
-                      test (norm < --dc), van der Waals sphere blocking test
-                      (--vdw-scale, --vdw-probe), own residue excluded.
-    default/cylinder  as default, with the cylinder test (--cr, inclusive).
-    v1/box            reproduces the original GLYCO script.
-    v2/cylinder       reproduces GLYCO-2.
+Counting modes (``--mode`` / ``--blocking``):
+
+================  =========================================================
+mode / blocking   description
+================  =========================================================
+default/vdw       heavy-atom starts (per-residue union), float64 pair test
+                  (norm < ``--dc``), van der Waals sphere blocking test
+                  (``--vdw-scale``, ``--vdw-probe``), own residue excluded
+default/cylinder  as default, with the cylinder test (``--cr``, inclusive)
+v1/box            reproduces the original GLYCO script
+v2/cylinder       reproduces GLYCO-2
+================  =========================================================
 """
 
 import collections
@@ -41,6 +46,16 @@ from MDAnalysis.guesser.default_guesser import DefaultGuesser
 from MDAnalysis.guesser.tables import vdwradii as VDW_RADII
 from scipy.spatial import cKDTree
 
+from glycokit.console import (
+    diagnostic,
+    error,
+    heading,
+    info,
+    set_color_mode,
+    style,
+    warning,
+    written,
+)
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import base_parser
 
@@ -83,6 +98,10 @@ OUTPUT_FILES = {
     "run_config.json": None,
     "excluded_glycan_atoms.csv": "write_excluded",
     "blockers.csv": "write_blockers",
+    "residue_histograms.csv": "write_stats",
+    "residue_statistics.csv": "write_stats",
+    "b_factors_stats.pdb": "write_stats",
+    "glyco_stats.cxc": "write_chimerax",
     VMD_SCRIPT_NAME: "write_vmd",
 }
 
@@ -174,16 +193,22 @@ def print_warning_summary(summary, log_path, max_lines=5, width=200):
     """
     if summary is None or summary.total == 0:
         return
-    print(
-        f"[warning] {summary.total} warning(s) during the run; details in {log_path}",
-        file=sys.stderr,
+    warning(
+        f"{summary.total} warning(s) during the run; details in "
+        f"{style(log_path, 'cyan', stream=sys.stderr)}"
     )
     for message, count in summary.counts.most_common(max_lines):
         text = message if len(message) <= width else message[: width - 3] + "..."
-        print(f"  - {text}" + (f" (x{count})" if count > 1 else ""), file=sys.stderr)
+        times = style(f" (x{count})", "dim", stream=sys.stderr) if count > 1 else ""
+        print(f"    - {text}{times}", file=sys.stderr)
     rest = len(summary.counts) - max_lines
     if rest > 0:
-        print(f"  ... and {rest} more distinct warning(s)", file=sys.stderr)
+        print(
+            style(
+                f"    ... and {rest} more distinct warning(s)", "dim", stream=sys.stderr
+            ),
+            file=sys.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -730,14 +755,12 @@ def confirm_overwrite(outdir, cfg):
 
     listing = ", ".join(existing)
     if cfg.force:
-        print(f"[info] overwriting in {outdir!r}: {listing} (--force given).")
+        info(f"overwriting in {style(outdir, 'cyan')}: {listing} (--force given)")
         return True
-
     if not sys.stdin.isatty():
-        print(
-            f"[error] {outdir!r} already contains: {listing}; no TTY is "
-            "available to prompt, pass --force to overwrite non-interactively.",
-            file=sys.stderr,
+        error(
+            f"{outdir!r} already contains: {listing}; no TTY is available to "
+            "prompt, pass --force to overwrite non-interactively"
         )
         return False
 
@@ -775,7 +798,7 @@ def load_universe(top, traj=None):
 
 class GlycoAnalysis(AnalysisBase):
     """
-    GlyCo (GLYcan COverage): glycan coverage of protein surface residues.
+    GlyCo (Glycan Coverage): glycan coverage of protein surface residues.
 
     Counting modes (``mode`` / ``blocking``):
 
@@ -1409,15 +1432,28 @@ class GlycoAnalysis(AnalysisBase):
         """Write the requested output files (AnalysisBase hook)."""
         if self._write_outputs:
             os.makedirs(self.outdir, exist_ok=True)
+            heading(f"Writing results to {style(self.outdir + '/', 'cyan')}")
+
             self.write_bfactors(frame_index=self.bfactor_frame)
             self.write_frame_summary()
             self.write_residue_csv(frame_index=self.bfactor_frame)
+
             if self.write_excluded:
                 self.write_excluded_glycan_atoms_csv(frame_index=self.bfactor_frame)
+
             if self.write_blockers and self._blocking != "box":
                 self.write_blockers_csv(frame_index=self.bfactor_frame)
+
             if self.write_vmd:
                 self.write_vmd_user_script()
+
+            if self.write_stats or self.write_chimerax:
+                self.write_histograms_csv()
+                self.write_statistics_csv()
+                stats_pdb = self.write_statistics_pdb(frame_index=self.bfactor_frame)
+                if self.write_chimerax:
+                    self.write_chimerax_script(structure=stats_pdb)
+
             self.write_run_config()
         self._frame_cache = None
 
@@ -2049,6 +2085,332 @@ class GlycoAnalysis(AnalysisBase):
         return start_idx, cand, vis, blockers, dists
 
     # -- output helpers ---------------------------------------------------------
+
+    def residue_histograms(self):
+        """
+        Histogram of every residue's glycan count over the analyzed frames.
+
+        Counts are integers, so there is one bin per count value.
+
+        :return: ``(values, hist)``: ``values`` are the count values
+            ``0 .. max``; ``hist[i, v]`` is the number of frames in which
+            residue ``i`` (``prot_atoms`` order) had count ``values[v]``.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+        :raises RuntimeError: Before :meth:`run`.
+        """
+        self._require_run()
+        counts = np.asarray(self.all_counts, dtype=np.int64)  # (n_frames, n_res)
+        n_frames, n_res = counts.shape
+        values = np.arange(int(counts.max(initial=0)) + 1)
+        hist = np.zeros((n_res, len(values)), dtype=np.int64)
+        rows = np.broadcast_to(np.arange(n_res), counts.shape)
+        np.add.at(hist, (rows.ravel(), counts.ravel()), 1)
+        return values, hist
+
+    def residue_statistics(self, confidence=0.95, method="percentile"):
+        """
+        Per-residue summary of the glycan counts over the analyzed frames.
+
+        :param float confidence: Interval coverage, between 0 and 1.
+        :param str method: ``'percentile'``: central interval of the per-frame
+            counts (how much coverage varies over the trajectory);
+            ``'mean'``: t-based confidence interval of the mean count.
+        :return: Arrays in ``prot_atoms`` order: ``mode`` (histogram maximum;
+            ties go to the lower count), ``mean``, ``std``, ``max``,
+            ``lower``, ``upper``, ``width`` and ``n_frames``.
+        :rtype: dict[str, numpy.ndarray]
+        :raises ValueError: On an invalid ``confidence`` or ``method``.
+        :raises RuntimeError: Before :meth:`run`.
+        """
+        if not 0 < confidence < 1:
+            raise ValueError(f"confidence must be between 0 and 1, got {confidence}")
+        values, hist = self.residue_histograms()
+        counts = np.asarray(self.all_counts, dtype=float)
+        n = counts.shape[0]
+        mean = counts.mean(axis=0)
+        std = counts.std(axis=0, ddof=1) if n > 1 else np.zeros(counts.shape[1])
+        alpha = (1.0 - confidence) / 2.0
+
+        if method == "percentile":
+            lower, upper = np.percentile(
+                counts, [100 * alpha, 100 * (1 - alpha)], axis=0
+            )
+        elif method == "mean":
+            if n > 1:
+                from scipy.stats import t
+
+                half = t.ppf(1 - alpha, n - 1) * std / np.sqrt(n)
+            else:
+                half = np.zeros_like(mean)
+            lower, upper = mean - half, mean + half
+        else:
+            raise ValueError(f"method must be 'percentile' or 'mean', got {method!r}")
+
+        return {
+            "mode": values[np.argmax(hist, axis=1)].astype(float),
+            "mean": mean,
+            "std": std,
+            "max": counts.max(axis=0),
+            "lower": lower,
+            "upper": upper,
+            "width": upper - lower,
+            "n_frames": np.full(counts.shape[1], n),
+        }
+
+    def write_histograms_csv(self, output=None):
+        """
+        residue_histograms.csv: one row per (residue, count value) that occurs.
+
+        Columns: chain, resid, resname, glycan_count, n_frames, fraction.
+
+        :param output: Default ``<outdir>/residue_histograms.csv``.
+        :type output: str or pathlib.Path or None
+        :rtype: pathlib.Path
+        :raises RuntimeError: Before :meth:`run`.
+        """
+        values, hist = self.residue_histograms()
+        names, cols = self._identity_columns(self.prot_atoms, atoms=False)
+        n_frames = self.all_counts.shape[0]
+
+        def batches():
+            for i in range(hist.shape[0]):
+                nz = np.flatnonzero(hist[i])
+                ident = [c[i] for c in cols]
+                yield (
+                    [
+                        *ident,
+                        int(values[v]),
+                        int(hist[i, v]),
+                        _fmt_float(hist[i, v] / n_frames),
+                    ]
+                    for v in nz
+                )
+
+        return self._write_csv(
+            output,
+            "residue_histograms.csv",
+            [*names, "glycan_count", "n_frames", "fraction"],
+            batches(),
+            "Residue histograms",
+        )
+
+    def write_statistics_csv(self, output=None, confidence=0.95, method="percentile"):
+        """
+        residue_statistics.csv: mode, mean, std, max and interval per residue.
+
+        :param output: Default ``<outdir>/residue_statistics.csv``.
+        :type output: str or pathlib.Path or None
+        :param float confidence: See :meth:`residue_statistics`.
+        :param str method: See :meth:`residue_statistics`.
+        :rtype: pathlib.Path
+        """
+        stats = self.residue_statistics(confidence, method)
+        names, cols = self._identity_columns(self.prot_atoms, atoms=False)
+        keys = ("mode", "mean", "std", "max", "lower", "upper", "width")
+        rows = (
+            [
+                *(c[i] for c in cols),
+                int(stats["n_frames"][i]),
+                *(_fmt_float(stats[k][i]) for k in keys),
+            ]
+            for i in range(len(self.prot_atoms))
+        )
+        return self._write_csv(
+            output,
+            "residue_statistics.csv",
+            [*names, "n_frames", *keys],
+            [rows],
+            "Residue statistics",
+        )
+
+    def _ensure_occupancies(self):
+        """Add an ``occupancies`` topology attribute if the Universe lacks one."""
+        try:
+            self.u.atoms.occupancies  # noqa: B018
+        except (AttributeError, mda.exceptions.NoDataError):
+            self.u.add_TopologyAttr("occupancies")
+
+    @staticmethod
+    def _strip_placeholder_cryst1(path, universe):
+        """Remove the 1 A CRYST1 MDAnalysis writes for a Universe without a box."""
+        dims = universe.dimensions
+        if dims is None or np.allclose(np.asarray(dims[:3]), 1.0):
+            lines = path.read_text().splitlines(keepends=True)
+            path.write_text("".join(l for l in lines if not l.startswith("CRYST1")))
+
+    def write_statistics_pdb(
+        self, frame_index=None, output=None, confidence=0.95, method="percentile"
+    ):
+        """
+        b_factors_stats.pdb: trajectory statistics in the B-factor and occupancy
+        columns.
+
+        B-factor: the histogram maximum (mode) of each residue's glycan count
+        over all analyzed frames. Occupancy: the width of the ``confidence``
+        interval (see :meth:`residue_statistics`). Every atom of a residue in
+        ``prot_atoms`` gets that residue's values; all other atoms get 0.
+        Coordinates come from ``frame_index``; the trajectory is restored
+        afterwards. The original tempfactors and occupancies of the Universe
+        are restored as well.
+
+        :param frame_index: Analyzed frame for the coordinates; None means the last.
+        :type frame_index: int or None
+        :param output: Default ``<outdir>/b_factors_stats.pdb``.
+        :type output: str or pathlib.Path or None
+        :param float confidence: See :meth:`residue_statistics`.
+        :param str method: See :meth:`residue_statistics`.
+        :rtype: pathlib.Path
+        """
+        k, _ = self._output_frame(frame_index)
+        stats = self.residue_statistics(confidence, method)
+        output = self._output_path(output, "b_factors_stats.pdb")
+        self._ensure_tempfactors()
+        self._ensure_occupancies()
+
+        for name, values in (
+            ("B-factor", stats["mode"]),
+            ("occupancy", stats["width"]),
+        ):
+            if values.size and values.max() > 999.99:
+                warnings.warn(
+                    f"max {name} value {values.max():g} exceeds the PDB "
+                    "column width (999.99); see residue_statistics.csv",
+                    stacklevel=2,
+                )
+
+        atoms, cols = self._residue_atom_rows()
+        old_bf = self.u.atoms.tempfactors.copy()
+        old_occ = self.u.atoms.occupancies.copy()
+        try:
+            self.u.atoms.tempfactors = np.zeros(self.u.atoms.n_atoms)
+            self.u.atoms.occupancies = np.zeros(self.u.atoms.n_atoms)
+            atoms.tempfactors = stats["mode"][cols]
+            atoms.occupancies = stats["width"][cols]
+            with self._at_analyzed_frame(k):
+                self.u.atoms.write(str(output))
+        finally:
+            self.u.atoms.tempfactors = old_bf
+            self.u.atoms.occupancies = old_occ
+        self._strip_placeholder_cryst1(output, self.u)
+        written("Trajectory statistics PDB", output, base=self.outdir)
+        return output
+
+    def write_chimerax_script(
+        self,
+        structure=None,
+        output=None,
+        palette="white:red",
+        worm_radii=(0.25, 2.0),
+        background_color="lightgray",
+    ):
+        """
+        ChimeraX command script (.cxc) for the trajectory statistics.
+
+        Opens ``structure`` (default: :meth:`write_statistics_pdb` output),
+        colors the protein by B-factor (histogram maximum) from white at 0 to
+        red at the largest value, and shows a worm cartoon whose radius follows
+        the occupancy (interval width). Atoms outside the protein keep
+        ``background_color``.
+
+        :param structure: Statistics PDB; None writes it first.
+        :type structure: str or pathlib.Path or None
+        :param output: Default ``<outdir>/glyco_stats.cxc``.
+        :type output: str or pathlib.Path or None
+        :param str palette: ChimeraX palette spread over ``0 .. maximum``;
+            default ``'white:red'``.
+        :param tuple worm_radii: Worm radius (Angstrom) at the smallest and
+            largest interval width.
+        :param str background_color: Color of atoms not in the protein.
+        :rtype: pathlib.Path
+        :raises RuntimeError: Before :meth:`run`.
+        """
+        self._require_run()
+        if structure is None:
+            structure = self.write_statistics_pdb()
+        structure = Path(structure).resolve()
+        if not structure.is_file():
+            self._error(
+                f"ChimeraX script: structure not found: {structure}",
+                exc=FileNotFoundError,
+            )
+
+        stats = self.residue_statistics()
+        bmax = float(stats["mode"].max()) if stats["mode"].size else 0.0
+        bmax = max(bmax, 1.0)  # avoid an empty range when all counts are 0
+        wmax = float(stats["width"].max()) if stats["width"].size else 0.0
+        if wmax == 0:
+            warnings.warn(
+                "all interval widths are 0 (e.g. a single analyzed frame); "
+                "the worm has a constant radius",
+                stacklevel=2,
+            )
+
+        spec = "(#1 & protein)"
+        path = structure.as_posix().replace('"', '\\"')
+        r0, r1 = worm_radii
+        lines = [
+            "# Auto-generated by glyco (GlyCo): trajectory statistics",
+            f"# B-factor  = histogram maximum, colored white (0) -> red ({bmax:g})",
+            "# occupancy = width of the 95% interval of the glycan count",
+            "close session",
+            f'open "{path}"',
+            "hide atoms",
+            "show cartoons",
+            f"color #1 {background_color}",
+            f"color byattribute bfactor {spec} palette {palette} "  # noqa: ISC004
+            f"range 0,{bmax:g} noValueColor {background_color}",
+            f"cartoon byattribute occupancy {spec} min:{r0:g} max:{r1:g}",
+            "view",
+        ]
+        output = self._output_path(output, "glyco_stats.cxc")
+        output.write_text("\n".join(lines) + "\n")
+        written("ChimeraX script", output, base=self.outdir)
+        return output
+
+    def plot_histograms(self, residues=None, output=None, max_plots=12):
+        """
+        Bar plots of the glycan-count histograms (requires matplotlib).
+
+        :param residues: Indices into ``prot_atoms``; None plots the residues
+            with the widest intervals.
+        :param output: Default ``<outdir>/residue_histograms.png``.
+        :param int max_plots: Maximum number of residues plotted.
+        :rtype: pathlib.Path
+        """
+        import matplotlib.pyplot as plt
+
+        values, hist = self.residue_histograms()
+        stats = self.residue_statistics()
+        if residues is None:
+            residues = np.argsort(stats["width"])[::-1][:max_plots]
+        names, cols = self._identity_columns(self.prot_atoms, atoms=False)
+        n = len(residues)
+        fig, axes = plt.subplots(
+            (n + 3) // 4,
+            min(n, 4),
+            squeeze=False,
+            figsize=(4 * min(n, 4), 3 * ((n + 3) // 4)),
+        )
+        for ax, i in zip(axes.ravel(), residues):
+            ax.bar(values, hist[i], width=0.9)
+            ax.axvline(stats["mode"][i], color="k", lw=1)
+            ax.axvspan(stats["lower"][i], stats["upper"][i], alpha=0.2)
+            ax.set_title(f"{cols[0][i]}:{cols[2][i]}{cols[1][i]}")
+            ax.set_xlabel("glycan count")
+            ax.set_ylabel("frames")
+        for ax in axes.ravel()[n:]:
+            ax.axis("off")
+        fig.tight_layout()
+        output = self._output_path(output, "residue_histograms.png")
+        fig.savefig(output, dpi=150)
+        plt.close(fig)
+        return output
+
+    def _diag(self, *parts):
+        """Dimmed diagnostic output, only with -v/--verbose."""
+        if self._verbose:
+            diagnostic(*parts)
+
     def _residue_atom_rows(self):
         """
         Atoms of the CA residues and the ``all_counts`` column of each.
@@ -2167,7 +2529,7 @@ class GlycoAnalysis(AnalysisBase):
                 batch = list(batch)
                 writer.writerows(batch)
                 n += len(batch)
-        print(f"{label} written to: {output} ({n} rows)")
+        written(label, output, n, base=self.outdir)
         return output
 
     def write_blockers_csv(
@@ -2264,7 +2626,7 @@ class GlycoAnalysis(AnalysisBase):
             output.write_text("".join(l for l in lines if not l.startswith("CRYST1")))
 
         np.save(output.with_suffix(".npy"), self.all_counts)
-        print(f"B-factors written to: {output} (+ {output.with_suffix('.npy').name})")
+        written("B-factors", output, base=self.outdir)
         return output
 
     def write_frame_summary(self, output=None):
@@ -2465,7 +2827,7 @@ class GlycoAnalysis(AnalysisBase):
             "versions": _package_versions(),
         }
         output.write_text(json.dumps(config, indent=2, default=str))
-        print(f"Run configuration written to: {output}")
+        written("Run configuration", output, base=self.outdir)
         return output
 
     def _write_progress(self, current, total):
@@ -2616,7 +2978,7 @@ class GlycoAnalysis(AnalysisBase):
 
         output = self._output_path(output, VMD_SCRIPT_NAME)
         output.write_text("\n".join(lines))
-        print(f"VMD script written to: {output}")
+        written("VMD script", output, base=self.outdir)
         return output
 
 
@@ -2671,6 +3033,7 @@ def main(argv=None):
     """
     parser = base_parser()
     args = parser.parse_args(argv)
+    set_color_mode(args.color)
     validate_arguments(args, parser.error)  # before loading any files
 
     is_streamlit = os.environ.get("GLYCO_STREAMLIT") == "1"
@@ -2691,23 +3054,20 @@ def main(argv=None):
     with warning_log(log_path):
         outdirs = _structure_outdirs(args.structures, args.outdir)
         for n, (path, outdir) in enumerate(zip(args.structures, outdirs), start=1):
-            print(f"[{n}/{len(args.structures)}] {path}")
+            heading(f"[{n}/{len(args.structures)}] {path}")
             if not confirm_overwrite(outdir, args):
                 failures.append((path, "output exists and overwrite declined"))
                 continue
             try:
                 _run_job(args, path, None, outdir, verbose)
             except Exception as e:  # noqa: BLE001
-                print(f"[error] {path}: {e}", file=sys.stderr)
+                error(f"{path}: {e}")
                 failures.append((path, str(e)))
 
     if failures:
-        print(
-            f"{len(failures)} of {len(args.structures)} structure(s) failed:",
-            file=sys.stderr,
-        )
+        error(f"{len(failures)} of {len(args.structures)} structure(s) failed:")
         for path, reason in failures:
-            print(f"  {path}: {reason}", file=sys.stderr)
+            print(f"    {path}: {reason}", file=sys.stderr)
         return 1
     return 0
 

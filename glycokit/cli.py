@@ -15,6 +15,8 @@ import importlib
 import sys
 from importlib import metadata
 
+from glycokit.console import error, style
+
 # subcommand -> (module with main(argv), one-line description)
 COMMANDS = {
     "run": ("glycokit.glyco", "glycan coverage of protein surface residues"),
@@ -37,7 +39,10 @@ def _usage():
     """Top-level help text."""
     width = max(map(len, COMMANDS))
     lines = ["usage: glyco <command> [options]", "", "commands:"]
-    lines += [f"  {name:<{width}}  {text}" for name, (_, text) in COMMANDS.items()]
+    lines += [
+        f"  {style(f'{name:<{width}}', 'bold')}  {text}"
+        for name, (_, text) in COMMANDS.items()
+    ]
     lines += ["", "Run 'glyco <command> --help' for the options of a command."]
     return "\n".join(lines)
 
@@ -64,9 +69,8 @@ def main(argv=None):
     if command not in COMMANDS:
         close = difflib.get_close_matches(command, COMMANDS, n=1)
         hint = f" (did you mean {close[0]!r}?)" if close else ""
-        print(
-            f"glyco: unknown command {command!r}{hint}\n\n{_usage()}", file=sys.stderr
-        )
+        error(f"unknown command {command!r}{hint}")
+        print(f"\n{_usage()}", file=sys.stderr)
         return 2
 
     # 'glyco run' / 'glyco standardize' without options: show that command's help

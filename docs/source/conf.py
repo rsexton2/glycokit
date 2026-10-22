@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Configuration file for the Sphinx documentation builder.
 #
@@ -15,9 +14,11 @@
 # In case the project was not installed
 import os
 import sys
-sys.path.insert(0, os.path.abspath("../.."))
-import glycokit  # noqa
+from importlib import metadata
 
+sys.path.insert(0, os.path.abspath("../../"))
+sys.path.insert(0, os.path.abspath("../source"))
+import glycokit  # noqa
 
 
 # -- Project information -----------------------------------------------------
@@ -28,12 +29,13 @@ copyright = (
     "Project structure based on the "
     "MDAnalysis Cookiecutter version 0.1"
 )
-author = "Ricky Sexton"
+author = "glycokit developers"
 
-# The short X.Y version
-version = ""
-# The full version, including alpha/beta/rc tags
-release = ""
+try:
+    release = metadata.version("glycokit")
+except metadata.PackageNotFoundError:
+    release = "unknown"
+version = release
 
 
 # -- General configuration ---------------------------------------------------
@@ -53,16 +55,25 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.extlinks",
+    "sphinx.ext.viewcode",
+    "sphinxarg.ext",  # sphinx-argparse: CLI pages from the parsers
+    "sphinxcontrib.mermaid",
     "mdanalysis_sphinx_theme",
 ]
 
+autodoc_default_options = {
+    "members": True,
+    "member-order": "bysource",
+    "show-inheritance": True,
+}
+
+autodoc_typehints = "description"
 autosummary_generate = True
 # This skips generating an autodoc of the test module
 # when using the autosummary directive that is included
 # by default in api.rst
-autodoc_mock_imports = [
-    'glycokit.tests'
-]
+# freesasa is a compiled extension; mock it if it fails to build on RTD
+autodoc_mock_imports = ["glycokit.tests", "freesasa"]
 napoleon_google_docstring = False
 napoleon_use_param = False
 napoleon_use_ivar = True
@@ -101,15 +112,15 @@ pygments_style = "default"
 # a list of builtin themes.
 #
 html_theme = "mdanalysis_sphinx_theme"
+html_title = "GlyCo (glycokit)"
+
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
 #
 html_theme_options = {
-
     "mda_official": False,
-
 }
 
 # Set your logo and favicon here -- replace the placeholders!
@@ -145,15 +156,12 @@ latex_elements = {
     # The paper size ("letterpaper" or "a4paper").
     #
     # "papersize": "letterpaper",
-
     # The font size ("10pt", "11pt" or "12pt").
     #
     # "pointsize": "10pt",
-
     # Additional stuff for the LaTeX preamble.
     #
     # "preamble": "",
-
     # Latex figure (float) alignment
     #
     # "figure_align": "htbp",
@@ -163,8 +171,7 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, "glycokit.tex", "GlyCoKit Documentation",
-     "glycokit", "manual"),
+    (master_doc, "glycokit.tex", "GlyCoKit Documentation", "glycokit", "manual"),
 ]
 
 
@@ -172,10 +179,7 @@ latex_documents = [
 
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
-man_pages = [
-    (master_doc, "glycokit", "GlyCoKit Documentation",
-     [author], 1)
-]
+man_pages = [(master_doc, "glycokit", "GlyCoKit Documentation", [author], 1)]
 
 
 # -- Options for Texinfo output ----------------------------------------------
@@ -184,14 +188,22 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-    (master_doc, "glycokit", "GlyCoKit Documentation",
-     author, "glycokit", "Glycan analyses",
-     "Miscellaneous"),
+    (
+        master_doc,
+        "glycokit",
+        "GlyCoKit Documentation",
+        author,
+        "glycokit",
+        "Glycan analyses",
+        "Miscellaneous",
+    ),
 ]
 
 
 # -- Extension configuration -------------------------------------------------
 intersphinx_mapping = {
-    "python": ("https://docs.python.org/3/", None),
-    "mdanalysis": ("https://docs.mdanalysis.org/stable/", None),
+    "python": ("https://docs.python.org/3", None),
+    "MDAnalysis": ("https://docs.mdanalysis.org/stable", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
+    "scipy": ("https://docs.scipy.org/doc/scipy", None),
 }

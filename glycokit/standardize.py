@@ -35,6 +35,7 @@ from pathlib import Path
 import MDAnalysis as mda
 import numpy as np
 
+from glycokit.console import heading, info, set_color_mode, style, warning
 from glycokit.parsers import standardize_parser
 
 # ----------------------------------------------------------------- constants
@@ -150,7 +151,7 @@ class StandardizeOptions:
     Options of :func:`standardize`.
 
     :standardize: never modifies an options object; values resolved at run
-    time (e.g. ``glycan_placement='auto'``) are only recorded in the report.
+        time (e.g. ``glycan_placement='auto'``) are only recorded in the report.
     """
 
     altloc: str = "keep"  # keep | first  ('first' drops atoms!)
@@ -1911,6 +1912,8 @@ def main(argv=None):
     """
     p = standardize_parser()
     a = p.parse_args(argv)
+    set_color_mode(a.color)
+
     if a.cryst1 and len(a.cryst1) not in (3, 6):
         p.error(
             f"--cryst1 takes 3 or 6 values (A B C [ALPHA BETA GAMMA]), "
@@ -1949,14 +1952,16 @@ def main(argv=None):
     rep = standardize(a.topology, out, a.traj, opt, a.topology_format)
 
     verify(f"{out}.pdb", a.traj, rep)
+
     for w in rep["warnings"]:
-        print("WARNING:", w)
+        warning(w)
     for i in rep["info"]:
-        print("INFO:", i)
-    print(
+        info(i)
+    heading(
         f"{rep['n_residues']} residues, {len(rep['glycans'])} glycans, "
         f"{len(rep['links'])} glycan links, {len(rep['gaps'])} gaps, "
-        f"{len(rep.get('chain_copies', []))} chain copies relabelled -> {out}.pdb"
+        f"{len(rep.get('chain_copies', []))} chain copies relabelled -> "
+        f"{style(out + '.pdb', 'cyan')}"
     )
 
 

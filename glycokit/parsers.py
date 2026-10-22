@@ -635,6 +635,24 @@ def base_parser():
         dest="write_blockers",
         action="store_true",
     )
+    add(
+        output,
+        ("--write-stats",),
+        "also write trajectory statistics: residue_histograms.csv, "
+        "residue_statistics.csv and b_factors_stats.pdb (B-factor = histogram "
+        "maximum of the glycan count, occupancy = width of its 95%% interval)",
+        dest="write_stats",
+        action="store_true",
+    )
+    add(
+        output,
+        ("--write-chimerax",),
+        "also write glyco_stats.cxc, a ChimeraX script that colors by the "
+        "histogram maximum and draws a worm by the interval width (implies "
+        "--write-stats)",
+        dest="write_chimerax",
+        action="store_true",
+    )
 
     misc = parser.add_argument_group("misc")
     add(
@@ -654,6 +672,15 @@ def base_parser():
         type=n_workers_int,
         default=1,
         metavar="N",
+    )
+    add(
+        misc,
+        ("--color",),
+        "color terminal output: auto (only on a terminal, and not when "
+        "NO_COLOR is set), always, or never",
+        dest="color",
+        choices=("auto", "always", "never"),
+        default="auto",
     )
     return parser
 
@@ -988,5 +1015,17 @@ def standardize_parser():
         type=positive_float,
         default=None,
         metavar="X",
+    )
+
+    # --- misc ----------------------------------------------------------
+    misc = parser.add_argument_group("misc")
+    add(
+        misc,
+        ("--color",),
+        "color terminal output: auto (only on a terminal, and not when "
+        "NO_COLOR is set), always, or never",
+        dest="color",
+        choices=("auto", "always", "never"),
+        default="auto",
     )
     return parser
