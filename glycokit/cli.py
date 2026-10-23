@@ -24,6 +24,7 @@ COMMANDS = {
         "glycokit.standardize",
         "normalise structure inputs for glyco / GLYCO",
     ),
+    "app": ("glycokit.app", "run the glyco web application"),
 }
 
 

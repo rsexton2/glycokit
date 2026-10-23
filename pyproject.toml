@@ -33,6 +33,7 @@ dynamic = [
 ]
 
 [project.optional-dependencies]
+app = ["streamlit"]
 test = [
     "pytest>=6.0",
     "pytest-xdist>=2.5",

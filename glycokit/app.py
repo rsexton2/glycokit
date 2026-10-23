@@ -506,283 +506,294 @@ def build_command(frame_mode, frames, frame_start, frame_stop, frame_step, cli_i
     return cmd
 
 
-# =====================================================================
-# Session state
-# =====================================================================
-
-for key, value in {
-    "u": None,
-    "topology_path": None,
-    "trajectory_paths": [],
-    "outdir": None,
-    "results_zip": None,
-    "last_run": None,
-    "prot_sel": "protein",
-    "gly_sel": "",
-}.items():
-    st.session_state.setdefault(key, value)
-
-
-# =====================================================================
-# Application
-# =====================================================================
-
-st.title("GlyCo: Glycan Coverage")
-
-# ---------------------------------------------------------------------
-# 1. Load files
-# ---------------------------------------------------------------------
-with st.expander("1. Load Structure and Trajectories", expanded=True):
-    st.write(
-        "Upload an MDAnalysis-compatible topology/structure file and, "
-        "optionally, one or more trajectory files."
-    )
-    topology_file = st.file_uploader(
-        "Topology / structure file",
-        key="topology_upload",
-        type=[k.lower() for k in mda._PARSERS],
-    )
-    trajectory_files = st.file_uploader(
-        "Trajectory files",
-        accept_multiple_files=True,
-        key="trajectory_upload",
-        type=[k.lower() for k in mda._READERS],
+def main():
+    """Run the Streamlit app."""
+    st.set_page_config(page_title="GlyCo: Glycan Coverage", layout="wide")
+    st.markdown(
+        "Glycan coverage of protein surface residues. "
+        "See the [documentation](https://glycokit.readthedocs.io/en/latest/glyco.html)."
     )
 
-    if topology_file is not None and st.button("Load Universe", type="primary"):
-        try:
-            with st.spinner("Loading MDAnalysis Universe..."):
-                create_universe(topology_file, trajectory_files)
-            clear_results()  # results of the old Universe
-            validate_atom_selections()  # selections against the NEW Universe
-            st.success("Universe loaded successfully.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Failed to load Universe: {e}")
+    # =====================================================================
+    # Session state
+    # =====================================================================
 
-u = st.session_state.u
+    for key, value in {
+        "u": None,
+        "topology_path": None,
+        "trajectory_paths": [],
+        "outdir": None,
+        "results_zip": None,
+        "last_run": None,
+        "prot_sel": "protein",
+        "gly_sel": "",
+    }.items():
+        st.session_state.setdefault(key, value)
 
-# ---------------------------------------------------------------------
-# 2. Universe information
-# ---------------------------------------------------------------------
-if u is not None:
-    with st.expander("2. Universe Information", expanded=True):
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Atoms", f"{u.atoms.n_atoms:,}")
-        col2.metric("Residues", f"{len(u.residues):,}")
-        col3.metric("Segments", f"{len(u.segments):,}")
-        col4.metric("Frames", f"{len(u.trajectory):,}")
-        if st.session_state.trajectory_paths:
-            st.subheader("Trajectory Information")
-            col1, col2 = st.columns(2)
-            col1.metric(
-                "Number of trajectories", len(st.session_state.trajectory_paths)
-            )
-            col2.metric("Total frames", f"{len(u.trajectory):,}")
-            st.write(f"**Timestep:** {round(u.trajectory.dt, 2)} ps")
-            st.write(f"**Total time:** {round(u.trajectory.totaltime, 2)} ps")
+    # =====================================================================
+    # Application
+    # =====================================================================
 
-# ---------------------------------------------------------------------
-# 3. Atom selections
-# ---------------------------------------------------------------------
-if u is not None:
-    with st.expander("3. Atom Selections", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.text_area(
-                "Protein Selection",
-                key="prot_sel",
-                height=100,
-                placeholder="protein",
-                on_change=validate_atom_selections,
-                help="MDAnalysis selection of the protein residues "
-                "(each needs one CA atom), e.g. 'protein'",
-            )
-        with col2:
-            st.text_area(
-                "Glycan Selection",
-                key="gly_sel",
-                height=100,
-                placeholder="resname NAG",
-                on_change=validate_atom_selections,
-                help="MDAnalysis selection of the glycan atoms, e.g. 'resname NAG BMA'",
-            )
+    st.title("GlyCo: Glycan Coverage")
 
-        results = st.session_state.get("selection_validation_results")
-        if results:
-            col1, col2 = st.columns(2)
-            for col, name in ((col1, "Protein"), (col2, "Glycan")):
-                with col:
-                    st.markdown(f"#### {name} Selection")
-                    result = results.get(name)
-                    if result and result["valid"]:
-                        st.success(f"Valid\n\n**{result['message']}**")
-                    elif result:
-                        st.error(result["message"])
-            if st.session_state.get("selections_valid", False):
-                st.success("✓ Both selections are valid and contain atoms.")
-            else:
-                st.error("✗ One or more selections must be corrected.")
-
-# ---------------------------------------------------------------------
-# 4. Trajectory options
-# ---------------------------------------------------------------------
-frames = None
-frame_mode = None
-frame_start = frame_stop = frame_step = None
-
-if u is not None:
-    n_frames = len(u.trajectory)
-    with st.expander("4. Trajectory Options", expanded=True):
-        frame_mode = st.radio(
-            "Frame selection method",
-            options=["Start / Stop / Step", "Frame list"],
-            horizontal=True,
-            key="frame_mode",
+    # ---------------------------------------------------------------------
+    # 1. Load files
+    # ---------------------------------------------------------------------
+    with st.expander("1. Load Structure and Trajectories", expanded=True):
+        st.write(
+            "Upload an MDAnalysis-compatible topology/structure file and, "
+            "optionally, one or more trajectory files."
+        )
+        topology_file = st.file_uploader(
+            "Topology / structure file",
+            key="topology_upload",
+            type=[k.lower() for k in mda._PARSERS],
+        )
+        trajectory_files = st.file_uploader(
+            "Trajectory files",
+            accept_multiple_files=True,
+            key="trajectory_upload",
+            type=[k.lower() for k in mda._READERS],
         )
 
-        if frame_mode == "Start / Stop / Step":
-            col1, col2, col3 = st.columns(3)
+        if topology_file is not None and st.button("Load Universe", type="primary"):
+            try:
+                with st.spinner("Loading MDAnalysis Universe..."):
+                    create_universe(topology_file, trajectory_files)
+                clear_results()  # results of the old Universe
+                validate_atom_selections()  # selections against the NEW Universe
+                st.success("Universe loaded successfully.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Failed to load Universe: {e}")
+
+    u = st.session_state.u
+
+    # ---------------------------------------------------------------------
+    # 2. Universe information
+    # ---------------------------------------------------------------------
+    if u is not None:
+        with st.expander("2. Universe Information", expanded=True):
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Atoms", f"{u.atoms.n_atoms:,}")
+            col2.metric("Residues", f"{len(u.residues):,}")
+            col3.metric("Segments", f"{len(u.segments):,}")
+            col4.metric("Frames", f"{len(u.trajectory):,}")
+            if st.session_state.trajectory_paths:
+                st.subheader("Trajectory Information")
+                col1, col2 = st.columns(2)
+                col1.metric(
+                    "Number of trajectories", len(st.session_state.trajectory_paths)
+                )
+                col2.metric("Total frames", f"{len(u.trajectory):,}")
+                st.write(f"**Timestep:** {round(u.trajectory.dt, 2)} ps")
+                st.write(f"**Total time:** {round(u.trajectory.totaltime, 2)} ps")
+
+    # ---------------------------------------------------------------------
+    # 3. Atom selections
+    # ---------------------------------------------------------------------
+    if u is not None:
+        with st.expander("3. Atom Selections", expanded=True):
+            col1, col2 = st.columns(2)
             with col1:
-                frame_start = st.number_input(
-                    "Start (blank = beginning)",
-                    min_value=0,
-                    max_value=n_frames - 1,
-                    value=None,
-                    step=1,
-                    placeholder="0",
+                st.text_area(
+                    "Protein Selection",
+                    key="prot_sel",
+                    height=100,
+                    placeholder="protein",
+                    on_change=validate_atom_selections,
+                    help="MDAnalysis selection of the protein residues "
+                    "(each needs one CA atom), e.g. 'protein'",
                 )
             with col2:
-                frame_stop = st.number_input(
-                    "Stop (exclusive; blank = end)",
-                    min_value=-n_frames,
-                    max_value=n_frames,
-                    value=None,
-                    step=1,
-                    placeholder=str(n_frames),
-                )
-            with col3:
-                frame_step = st.number_input(
-                    "Step (blank = every frame)",
-                    min_value=1,
-                    value=None,
-                    step=1,
-                    placeholder="1",
+                st.text_area(
+                    "Glycan Selection",
+                    key="gly_sel",
+                    height=100,
+                    placeholder="resname NAG",
+                    on_change=validate_atom_selections,
+                    help="MDAnalysis selection of the glycan atoms, e.g. 'resname NAG BMA'",
                 )
 
-            # same semantics as Python slicing, so negative stops work
-            selected = range(n_frames)[slice(frame_start, frame_stop, frame_step)]
-            if len(selected) == 0:
-                st.error("This start / stop / step selects no frames.")
-            else:
-                frames = slice(frame_start, frame_stop, frame_step)
-                st.caption(f"{len(selected)} frame(s) selected")
-        else:
-            frame_text = st.text_area(
-                "Frames",
-                value="0",
-                help="Frame numbers separated by commas, spaces or new lines.",
+            results = st.session_state.get("selection_validation_results")
+            if results:
+                col1, col2 = st.columns(2)
+                for col, name in ((col1, "Protein"), (col2, "Glycan")):
+                    with col:
+                        st.markdown(f"#### {name} Selection")
+                        result = results.get(name)
+                        if result and result["valid"]:
+                            st.success(f"Valid\n\n**{result['message']}**")
+                        elif result:
+                            st.error(result["message"])
+                if st.session_state.get("selections_valid", False):
+                    st.success("✓ Both selections are valid and contain atoms.")
+                else:
+                    st.error("✗ One or more selections must be corrected.")
+
+    # ---------------------------------------------------------------------
+    # 4. Trajectory options
+    # ---------------------------------------------------------------------
+    frames = None
+    frame_mode = None
+    frame_start = frame_stop = frame_step = None
+
+    if u is not None:
+        n_frames = len(u.trajectory)
+        with st.expander("4. Trajectory Options", expanded=True):
+            frame_mode = st.radio(
+                "Frame selection method",
+                options=["Start / Stop / Step", "Frame list"],
+                horizontal=True,
+                key="frame_mode",
             )
-            try:
-                frames = sorted({int(x) for x in frame_text.replace(",", " ").split()})
-                if not frames:
-                    st.error("Enter at least one frame.")
+
+            if frame_mode == "Start / Stop / Step":
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    frame_start = st.number_input(
+                        "Start (blank = beginning)",
+                        min_value=0,
+                        max_value=n_frames - 1,
+                        value=None,
+                        step=1,
+                        placeholder="0",
+                    )
+                with col2:
+                    frame_stop = st.number_input(
+                        "Stop (exclusive; blank = end)",
+                        min_value=-n_frames,
+                        max_value=n_frames,
+                        value=None,
+                        step=1,
+                        placeholder=str(n_frames),
+                    )
+                with col3:
+                    frame_step = st.number_input(
+                        "Step (blank = every frame)",
+                        min_value=1,
+                        value=None,
+                        step=1,
+                        placeholder="1",
+                    )
+
+                # same semantics as Python slicing, so negative stops work
+                selected = range(n_frames)[slice(frame_start, frame_stop, frame_step)]
+                if len(selected) == 0:
+                    st.error("This start / stop / step selects no frames.")
+                else:
+                    frames = slice(frame_start, frame_stop, frame_step)
+                    st.caption(f"{len(selected)} frame(s) selected")
+            else:
+                frame_text = st.text_area(
+                    "Frames",
+                    value="0",
+                    help="Frame numbers separated by commas, spaces or new lines.",
+                )
+                try:
+                    frames = sorted(
+                        {int(x) for x in frame_text.replace(",", " ").split()}
+                    )
+                    if not frames:
+                        st.error("Enter at least one frame.")
+                        frames = None
+                    elif any(f < 0 or f >= n_frames for f in frames):
+                        st.error(f"Frames must be between 0 and {n_frames - 1}.")
+                        frames = None
+                except ValueError:
+                    st.error("Invalid frame list.")
                     frames = None
-                elif any(f < 0 or f >= n_frames for f in frames):
-                    st.error(f"Frames must be between 0 and {n_frames - 1}.")
-                    frames = None
-            except ValueError:
-                st.error("Invalid frame list.")
-                frames = None
 
-# ---------------------------------------------------------------------
-# 5. Analysis parameters
-# ---------------------------------------------------------------------
-cli_inputs, cli_errors = {}, []
-if u is not None:
-    with st.expander("5. Analysis Parameters", expanded=True):
-        cli_inputs, cli_errors = create_cli_inputs(parser)
+    # ---------------------------------------------------------------------
+    # 5. Analysis parameters
+    # ---------------------------------------------------------------------
+    cli_inputs, cli_errors = {}, []
+    if u is not None:
+        with st.expander("5. Analysis Parameters", expanded=True):
+            cli_inputs, cli_errors = create_cli_inputs(parser)
 
-# ---------------------------------------------------------------------
-# 6. Run analysis
-# ---------------------------------------------------------------------
-if u is not None:
-    st.header("6. Run Analysis")
+    # ---------------------------------------------------------------------
+    # 6. Run analysis
+    # ---------------------------------------------------------------------
+    if u is not None:
+        st.header("6. Run Analysis")
 
-    selections_valid = (
-        st.session_state.get("selections_valid", False)
-        and st.session_state.get("prot_sel", "").strip()
-        == st.session_state.get("_validated_prot_sel")
-        and st.session_state.get("gly_sel", "").strip()
-        == st.session_state.get("_validated_gly_sel")
-    )
-    if not selections_valid:
-        st.warning(
-            "Enter valid protein and glycan selections before running the analysis."
+        selections_valid = (
+            st.session_state.get("selections_valid", False)
+            and st.session_state.get("prot_sel", "").strip()
+            == st.session_state.get("_validated_prot_sel")
+            and st.session_state.get("gly_sel", "").strip()
+            == st.session_state.get("_validated_gly_sel")
         )
-    frames_valid = frames is not None
-    if not frames_valid:
-        st.warning(
-            "A valid set of trajectory frames must be selected before "
-            "running the analysis."
-        )
-    if cli_errors:
-        st.warning("Fix the analysis parameters in section 5 before running.")
+        if not selections_valid:
+            st.warning(
+                "Enter valid protein and glycan selections before running the analysis."
+            )
+        frames_valid = frames is not None
+        if not frames_valid:
+            st.warning(
+                "A valid set of trajectory frames must be selected before "
+                "running the analysis."
+            )
+        if cli_errors:
+            st.warning("Fix the analysis parameters in section 5 before running.")
 
-    ready = selections_valid and frames_valid and not cli_errors
-    if st.button(
-        "Run Analysis", type="primary", use_container_width=True, disabled=not ready
-    ):
-        missing = [
-            p
-            for p in [
-                st.session_state.topology_path,
-                *st.session_state.trajectory_paths,
+        ready = selections_valid and frames_valid and not cli_errors
+        if st.button(
+            "Run Analysis", type="primary", use_container_width=True, disabled=not ready
+        ):
+            missing = [
+                p
+                for p in [
+                    st.session_state.topology_path,
+                    *st.session_state.trajectory_paths,
+                ]
+                if not p or not os.path.exists(p)
             ]
-            if not p or not os.path.exists(p)
-        ]
-        if missing:
-            st.error(f"Input file(s) no longer exist: {missing}. Reload the Universe.")
-            st.stop()
+            if missing:
+                st.error(
+                    f"Input file(s) no longer exist: {missing}. Reload the Universe."
+                )
+                st.stop()
 
-        cmd = build_command(
-            frame_mode, frames, frame_start, frame_stop, frame_step, cli_inputs
-        )
+            cmd = build_command(
+                frame_mode, frames, frame_start, frame_stop, frame_step, cli_inputs
+            )
 
-        # fresh output directory for every run
-        clear_results()
-        st.session_state.outdir = tempfile.mkdtemp(prefix="glyco_")
-        _remove_tree_at_exit(st.session_state.outdir)
-        cmd += ["--outdir", st.session_state.outdir, "--force"]
+            # fresh output directory for every run
+            clear_results()
+            st.session_state.outdir = tempfile.mkdtemp(prefix="glyco_")
+            _remove_tree_at_exit(st.session_state.outdir)
+            cmd += ["--outdir", st.session_state.outdir, "--force"]
 
-        try:
-            returncode, output = run_analysis(cmd)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Failed to run glyco:\n\n{e}")
-            st.stop()
-        st.session_state.last_run = {
-            "command": shlex.join(cmd),
-            "returncode": returncode,
-            "output": output,
-        }
-        st.session_state.results_zip = (
-            zip_directory(st.session_state.outdir) if returncode == 0 else None
-        )
+            try:
+                returncode, output = run_analysis(cmd)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Failed to run glyco:\n\n{e}")
+                st.stop()
+            st.session_state.last_run = {
+                "command": shlex.join(cmd),
+                "returncode": returncode,
+                "output": output,
+            }
+            st.session_state.results_zip = (
+                zip_directory(st.session_state.outdir) if returncode == 0 else None
+            )
 
-    # ---- results (kept across reruns, e.g. after clicking download) ----
-    last = st.session_state.last_run
-    if last:
-        with st.expander("Command", expanded=False):
-            st.code(last["command"], language="bash")
-        with st.expander("Analysis Output", expanded=False):
-            st.code(last["output"] or "No output.", language="text")
-        if last["returncode"] == 0:
-            st.success("Analysis completed successfully.")
-        else:
-            st.error(f"Analysis failed (exit code {last['returncode']}).")
-    if st.session_state.results_zip:
-        st.download_button(
-            "Download results (ZIP)",
-            st.session_state.results_zip,
-            file_name="glyco_results.zip",
-            mime="application/zip",
-        )
+        # ---- results (kept across reruns, e.g. after clicking download) ----
+        last = st.session_state.last_run
+        if last:
+            with st.expander("Command", expanded=False):
+                st.code(last["command"], language="bash")
+            with st.expander("Analysis Output", expanded=False):
+                st.code(last["output"] or "No output.", language="text")
+            if last["returncode"] == 0:
+                st.success("Analysis completed successfully.")
+            else:
+                st.error(f"Analysis failed (exit code {last['returncode']}).")
+        if st.session_state.results_zip:
+            st.download_button(
+                "Download results (ZIP)",
+                st.session_state.results_zip,
+                file_name="glyco_results.zip",
+                mime="application/zip",
+            )
