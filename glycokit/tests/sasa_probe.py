@@ -6,6 +6,7 @@ Output JSON: {"version": 2, "pid": int, "calls": [...], "events": [...]}
 Only the current process is patched: SASA computed in worker processes or by
 the freesasa executable shows up under "events", not "calls".
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -65,26 +66,28 @@ def _caller(depth: int = 4) -> list[str]:
 
 def _event(kind: str, arg0) -> None:
     if _state is not None:
-        _state["events"].append({"event": kind, "arg0": repr(arg0)[:300], "caller": _caller()})
+        _state["events"].append(
+            {"event": kind, "arg0": repr(arg0)[:300], "caller": _caller()}
+        )
 
 
 def _params(p) -> dict:
     if p is None:
-        p = freesasa.Parameters()               # what FreeSASA uses when None is passed
+        p = freesasa.Parameters()  # what FreeSASA uses when None is passed
     out = {}
     for name in ("probeRadius", "algorithm", "nPoints", "nSlices", "nThreads"):
         fn = getattr(p, name, None)
         if callable(fn):
             try:
                 out[name] = fn()
-            except Exception as exc:            # some getters only apply to one algorithm
+            except Exception as exc:  # some getters only apply to one algorithm
                 out[name] = f"<{exc}>"
     return out
 
 
 def _reference_classifier():
     try:
-        return freesasa.Classifier()            # default classifier (ProtOr)
+        return freesasa.Classifier()  # default classifier (ProtOr)
     except Exception:
         return None
 
@@ -102,22 +105,25 @@ def _structure_atoms(s) -> list[dict]:
             except Exception:
                 pass
         x, y, z = s.coord(i)
-        atoms.append({
-            "i": i,
-            "chain": s.chainLabel(i).strip(),
-            "resnum": s.residueNumber(i).strip(),
-            "resname": resname,
-            "name": name,
-            "radius": round(s.radius(i), 4),
-            "protor_radius": ref_r,
-            "xyz": [round(x, 3), round(y, 3), round(z, 3)],
-        })
+        atoms.append(
+            {
+                "i": i,
+                "chain": s.chainLabel(i).strip(),
+                "resnum": s.residueNumber(i).strip(),
+                "resname": resname,
+                "name": name,
+                "radius": round(s.radius(i), 4),
+                "protor_radius": ref_r,
+                "xyz": [round(x, 3), round(y, 3), round(z, 3)],
+            }
+        )
     return atoms
 
 
 def _flat(seq) -> list[float]:
     try:
         import numpy as np
+
         return [float(v) for v in np.asarray(seq, dtype=float).ravel()]
     except Exception:
         return [float(v) for v in seq]
@@ -135,8 +141,13 @@ def _calc(structure, *args, **kwargs):
     result = _ORIG["freesasa.calc"](structure, *args, **kwargs)
     if _state is not None:
         params = args[0] if args else kwargs.get("parameters")
-        rec = {"call": "calc", "caller": _caller(), "params": _params(params),
-               "n_atoms": structure.nAtoms(), "atoms": _structure_atoms(structure)}
+        rec = {
+            "call": "calc",
+            "caller": _caller(),
+            "params": _params(params),
+            "n_atoms": structure.nAtoms(),
+            "atoms": _structure_atoms(structure),
+        }
         areas = [result.atomArea(i) for i in range(structure.nAtoms())]
         for a, area in zip(rec["atoms"], areas):
             a["area"] = round(area, 4)
@@ -144,16 +155,27 @@ def _calc(structure, *args, **kwargs):
         _state["calls"].append(rec)
     return result
 
+
 def _calc_coord(coord, radii, *args, **kwargs):
     if _state is not None:
         c, r = _flat(coord), _flat(radii)
         params = args[0] if args else kwargs.get("parameters")
-        _state["calls"].append({
-            "call": "calcCoord", "caller": _caller(), "params": _params(params),
-            "n_atoms": len(r),
-            "atoms": [{"i": i, "radius": round(ri, 4),
-                       "xyz": [round(v, 3) for v in c[3 * i:3 * i + 3]]}
-                      for i, ri in enumerate(r)]})
+        _state["calls"].append(
+            {
+                "call": "calcCoord",
+                "caller": _caller(),
+                "params": _params(params),
+                "n_atoms": len(r),
+                "atoms": [
+                    {
+                        "i": i,
+                        "radius": round(ri, 4),
+                        "xyz": [round(v, 3) for v in c[3 * i : 3 * i + 3]],
+                    }
+                    for i, ri in enumerate(r)
+                ],
+            }
+        )
     return _ORIG["freesasa.calcCoord"](coord, radii, *args, **kwargs)
 
 
@@ -163,13 +185,14 @@ def _logged(key: str):
     def wrapper(*args, **kwargs):
         _event(key, args[0] if args else kwargs)
         return orig(*args, **kwargs)
+
     wrapper.__wrapped__ = orig
     return wrapper
 
 
-class _LoggedPopen(_ORIG["subprocess.Popen"]):       # subclass keeps isinstance() working
+class _LoggedPopen(_ORIG["subprocess.Popen"]):  # subclass keeps isinstance() working
     def __init__(self, args, *a, **kw):
-        _event("subprocess.Popen", args)             # also catches subprocess.run/check_output
+        _event("subprocess.Popen", args)  # also catches subprocess.run/check_output
         super().__init__(args, *a, **kw)
 
 
@@ -183,15 +206,24 @@ def _swaps() -> dict[int, tuple[str, object]]:
     repl = {
         "freesasa.calc": _calc,
         "freesasa.calcCoord": _calc_coord,
-        "freesasa.calcBioPDB": _logged("freesasa.calcBioPDB") if _ORIG["freesasa.calcBioPDB"] else None,
-        "freesasa.structureArray": _logged("freesasa.structureArray") if _ORIG["freesasa.structureArray"] else None,
-        "freesasa.classifyResults": _logged("freesasa.classifyResults") if _ORIG["freesasa.classifyResults"] else None,
+        "freesasa.calcBioPDB": _logged("freesasa.calcBioPDB")
+        if _ORIG["freesasa.calcBioPDB"]
+        else None,
+        "freesasa.structureArray": _logged("freesasa.structureArray")
+        if _ORIG["freesasa.structureArray"]
+        else None,
+        "freesasa.classifyResults": _logged("freesasa.classifyResults")
+        if _ORIG["freesasa.classifyResults"]
+        else None,
         "subprocess.Popen": _LoggedPopen,
         "multiprocessing.Pool": _logged("multiprocessing.Pool"),
         "concurrent.futures.ProcessPoolExecutor": _LoggedProcessPool,
     }
-    return {id(_ORIG[k]): (k, v) for k, v in repl.items()
-            if v is not None and _ORIG.get(k) is not None}
+    return {
+        id(_ORIG[k]): (k, v)
+        for k, v in repl.items()
+        if v is not None and _ORIG.get(k) is not None
+    }
 
 
 def _patch_everywhere(swaps) -> list[tuple[dict, str, object]]:
@@ -202,7 +234,7 @@ def _patch_everywhere(swaps) -> list[tuple[dict, str, object]]:
             continue
         try:
             if os.path.abspath(getattr(mod, "__file__", "") or "") == _THIS_FILE:
-                continue                         # never patch the probe itself
+                continue  # never patch the probe itself
             d = vars(mod)
         except Exception:
             continue
@@ -238,14 +270,17 @@ def capture(path, *, require_calls: bool = False):
         _state = None
         with open(path, "w") as fh:
             json.dump(data, fh, indent=1, default=str)
-        print(f"{path}: {len(data['calls'])} FreeSASA call(s) "
-              f"{[(c['call'], c['n_atoms'], c['caller'][0] if c['caller'] else '?') for c in data['calls']]}; "
-              f"events: {[e['event'] for e in data['events']]}")
+        print(
+            f"{path}: {len(data['calls'])} FreeSASA call(s) "
+            f"{[(c['call'], c['n_atoms'], c['caller'][0] if c['caller'] else '?') for c in data['calls']]}; "
+            f"events: {[e['event'] for e in data['events']]}"
+        )
         assert freesasa.calc is _ORIG["freesasa.calc"], "freesasa.calc was not restored"
     if completed and require_calls and not data["calls"]:
         raise AssertionError(
             f"{path}: no FreeSASA calls captured (cached result, worker process, "
-            f"or subprocess? events={[e['event'] for e in data['events']]})")
+            f"or subprocess? events={[e['event'] for e in data['events']]})"
+        )
 
 
 def load_calls(path) -> list[dict]:

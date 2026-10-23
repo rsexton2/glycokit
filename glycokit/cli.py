@@ -24,7 +24,7 @@ COMMANDS = {
         "glycokit.standardize",
         "normalise structure inputs for glyco / GLYCO",
     ),
-    "app": ("glycokit.app", "run the glyco web application"),
+    "app": ("glycokit.webapp", "start the GlyCo web app (Streamlit)"),
 }
 
 
@@ -75,7 +75,7 @@ def main(argv=None):
         return 2
 
     # 'glyco run' / 'glyco standardize' without options: show that command's help
-    if not rest:
+    if not rest and command != "app":
         rest = ["--help"]
 
     module = importlib.import_module(COMMANDS[command][0])  # lazy: only what is used

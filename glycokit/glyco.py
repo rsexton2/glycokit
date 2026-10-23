@@ -1005,11 +1005,6 @@ class GlycoAnalysis(AnalysisBase):
         if getattr(self, "residue_areas", None) is None:
             raise RuntimeError(f"{type(self).__name__}.run() must be called first")
 
-    def _diag(self, *parts):
-        """Diagnostic output, only with -v/--verbose."""
-        if self._verbose:
-            print(*parts, flush=True)
-
     def _validate_args(self):
         """
         Validate parameters via :func:`validate_arguments`.
