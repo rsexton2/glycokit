@@ -905,6 +905,10 @@ class GlycoAnalysis(AnalysisBase):
     write_vmd: bool
     write_stats: bool
     write_chimerax: bool
+    color: str
+    force: bool
+    in_types: str
+    verbose: bool
 
     @classmethod
     def get_supported_backends(cls):
