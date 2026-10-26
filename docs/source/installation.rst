@@ -20,6 +20,12 @@ Create a virtual environment and activate it:
    conda create --name glycokit
    conda activate glycokit
 
+Clone this repository and change into the cloned directory:
+.. code-block:: bash
+
+   git clone github.com/rsexton/glycokit.git
+   cd glycokit
+
 Install the development and documentation dependencies:
 
 .. code-block:: bash

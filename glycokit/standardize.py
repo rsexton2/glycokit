@@ -27,6 +27,7 @@ import csv
 import json
 import re
 import string
+import warnings
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
@@ -105,6 +106,11 @@ SUGAR_TEST_INSTANCES = 10
 
 # Chain letters tried for glycan chains (lowercase first)
 CHAIN_POOL = string.ascii_lowercase + string.ascii_uppercase + string.digits
+
+# Errors from reading biotite's bundled CCD data: missing or unreadable data
+# files, or a data format this biotite version doesn't expect.
+_CCD_DATA_ERRORS = (OSError, ValueError, KeyError)
+
 # fmt: on
 
 
@@ -184,6 +190,7 @@ class StandardizeOptions:
     not_glycan: tuple | None = None  # resnames never treated as glycans
     protein_chain_default: str = "A"  # used only when chain IDs are blank (e.g. GRO)
     renumber_blank_other: bool = True  # renumber solvent/ions that had no chain ID
+    resname_map: dict[str, str] = field(default_factory=dict)
     ter_before_glycans: bool = (
         False  # True: old behaviour (TER before attached glycans)
     )
@@ -286,7 +293,7 @@ def _read(topology, trajectory, topology_format, frame):
         if trajectory
         else mda.Universe(topology, **kw)
     )
-    u.trajectory[frame]
+    u.trajectory[frame]  # pylint: disable=pointless-statement  # load the frame
     ag = u.atoms
     t = {
         "name": [str(x).strip() for x in ag.names],
@@ -319,7 +326,7 @@ def _read_cryst1(path):
     p = str(path).lower()
     if not p.endswith((".pdb", ".ent")):
         return None
-    with open(path) as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
             if line.startswith("CRYST1"):
                 return line.rstrip("\n")
@@ -420,11 +427,22 @@ def _ccd_carbohydrates():
     :rtype: frozenset[str]
     """
     try:
+        # optional dependency: imported on first use only
+        # pylint: disable-next=import-outside-toplevel
         from biotite.structure.info import carbohydrate_names
-
-        return frozenset(str(n).upper() for n in carbohydrate_names())
-    except Exception:  # not installed, or API/data unavailable  # noqa: BLE001
+    except ImportError:  # not installed, or too old for carbohydrate_names
         return frozenset()
+
+    try:
+        names = carbohydrate_names()
+    except _CCD_DATA_ERRORS as exc:
+        warnings.warn(
+            f"biotite is installed but its CCD carbohydrate data could not "
+            f"be read ({exc}); CCD-based glycan detection is disabled",
+            stacklevel=2,
+        )
+        return frozenset()
+    return frozenset(str(n).upper() for n in names)
 
 
 def _base_kind(resname):
@@ -1566,7 +1584,7 @@ def _reorder_residues(res, t, pos, bonds, conect, link_pairs, attach, mode, rep)
 
 def _write_atom_map(path, perm):
     """Write ``new_serial, orig_index`` for every atom after reordering."""
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["new_serial", "orig_index"])
         for new, old in enumerate(perm):
@@ -1602,7 +1620,7 @@ def _res_fields(r):
     return rn, (r.chain[:1] or " "), hy36(r.resid, 4), (r.icode or " ")[:1]
 
 
-def _write_pdb(path, res, t, pos, opt, rep, cryst_line, conect, ter):
+def _write_pdb(path, res, t, pos, rep, cryst_line, conect, ter):
     """
     Write the fixed-column PDB file.
 
@@ -1612,7 +1630,7 @@ def _write_pdb(path, res, t, pos, opt, rep, cryst_line, conect, ter):
     """
     big_serial = len(t["name"]) > 99999
     big_resid = any(r.resid > 9999 for r in res)
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("REMARK   1 STANDARDIZED BY glyco_standardize\n")
         if cryst_line:
             fh.write(cryst_line + "\n")
@@ -1657,7 +1675,7 @@ def _write_pdb(path, res, t, pos, opt, rep, cryst_line, conect, ter):
 
 def _write_csv(path, res):
     """Write ``<prefix>_residues.csv``: final and original labels of every residue."""
-    with open(path, "w", newline="") as fh:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(
             [
@@ -1860,9 +1878,9 @@ def standardize(
     rep["info"].append("ANISOU records (if any) are not written")
 
     cryst = _cryst1_line(topology, trajectory, u, opt, rep)
-    _write_pdb(f"{out_prefix}.pdb", res, t, pos, opt, rep, cryst, conect, ter)
+    _write_pdb(f"{out_prefix}.pdb", res, t, pos, rep, cryst, conect, ter)
     _write_csv(f"{out_prefix}_residues.csv", res)
-    with open(f"{out_prefix}_report.json", "w") as fh:
+    with open(f"{out_prefix}_report.json", "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=2, default=str)
     return rep
 

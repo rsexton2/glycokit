@@ -21,7 +21,9 @@ _CODES = {
     "magenta": "35",
     "cyan": "36",
 }
-_MODE = "auto"  # auto | always | never
+
+_MODES = ("auto", "always", "never")
+_STATE = {"color_mode": "auto"}  # process-wide; changed only by set_color_mode()
 
 
 def set_color_mode(mode):
@@ -31,10 +33,17 @@ def set_color_mode(mode):
     :param str mode: ``'auto'``, ``'always'`` or ``'never'``.
     :raises ValueError: On an unknown mode.
     """
-    global _MODE
-    if mode not in ("auto", "always", "never"):
+    if mode not in _MODES:
         raise ValueError(f"color mode must be auto, always or never, got {mode!r}")
-    _MODE = mode
+    _STATE["color_mode"] = mode
+
+
+def _is_tty(stream):
+    """Whether ``stream`` is a terminal (False for closed or replaced streams)."""
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 def use_color(stream=None):
@@ -43,21 +52,17 @@ def use_color(stream=None):
 
     :rtype: bool
     """
-    stream = sys.stdout if stream is None else stream
-    if _MODE == "never":
+    mode = _STATE["color_mode"]
+    if mode != "auto":
+        return mode == "always"
+    env = os.environ
+    if env.get("NO_COLOR"):
         return False
-    if _MODE == "always":
+    if env.get("FORCE_COLOR") or env.get("CLICOLOR_FORCE"):
         return True
-    if os.environ.get("NO_COLOR"):
+    if env.get("GLYCO_STREAMLIT") == "1":
         return False
-    if os.environ.get("FORCE_COLOR") or os.environ.get("CLICOLOR_FORCE"):
-        return True
-    if os.environ.get("GLYCO_STREAMLIT") == "1":
-        return False
-    try:
-        return stream.isatty()
-    except (AttributeError, ValueError):  # closed or replaced streams
-        return False
+    return _is_tty(sys.stdout if stream is None else stream)
 
 
 def style(text, *names, stream=None):

@@ -22,11 +22,17 @@ import zipfile
 import MDAnalysis as mda
 import streamlit as st
 
+from glycokit.glyco import _LOAD_ERRORS as LOAD_ERRORS
+from glycokit.glyco import _SELECTION_ERRORS as SELECTION_ERRORS
 from glycokit.parsers import base_parser
 
+# Errors from starting the glyco subprocess and its temporary files
 # =====================================================================
 # Configuration
 # =====================================================================
+
+# Errors from starting the glyco subprocess and its temporary files
+RUN_ERRORS = (OSError, ValueError, subprocess.SubprocessError)
 
 GLYCO_COMMAND = [sys.executable, "-m", "glycokit.glyco"]
 
@@ -69,7 +75,8 @@ _MIN_VALUES = {"positive_float": 1e-6, "non_negative_float": 0.0, "n_workers_int
 # =====================================================================
 
 
-def get_analysis_arguments(parser):
+def get_analysis_arguments(_parser):
+    # pylint: disable=protected-access
     """
     Describe every option of ``parser`` as a dict (help action excluded).
 
@@ -82,7 +89,7 @@ def get_analysis_arguments(parser):
     :rtype: list[dict]
     """
     arguments = []
-    for action in parser._actions:
+    for action in _parser._actions:
         if isinstance(action, argparse._HelpAction):
             continue
         if action.default == argparse.SUPPRESS:
@@ -118,7 +125,7 @@ def get_analysis_arguments(parser):
     return arguments
 
 
-def create_cli_inputs(parser, exclude=HANDLED_DESTS):
+def create_cli_inputs(_parser, exclude=None):
     """
     Streamlit widgets for every parser option not in ``exclude``.
 
@@ -130,8 +137,11 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
         input errors that must be fixed before running.
     :rtype: tuple[dict, list[str]]
     """
+    if exclude is None:
+        exclude = HANDLED_DESTS
+
     values, errors = {}, []
-    for arg in get_analysis_arguments(parser):
+    for arg in get_analysis_arguments(_parser):
         dest = arg["dest"]
         if dest in exclude:
             continue
@@ -139,14 +149,14 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
         default, arg_type = arg["default"], arg["type"]
         help_text = arg["help"]
         label = max(arg["option_strings"] or [arg["name"]], key=len).lstrip("-")
-        key = f"cli_{dest}"
+        _key = f"cli_{dest}"
         min_value = _MIN_VALUES.get(arg["type_name"])
 
         if arg["action"] in ("store_true", "store_false"):
-            value = (
+            _value = (
                 default if isinstance(default, bool) else arg["action"] == "store_false"
             )
-            values[dest] = st.checkbox(label, value=value, help=help_text, key=key)
+            values[dest] = st.checkbox(label, value=_value, help=help_text, key=_key)
 
         elif arg["choices"] is not None:
             choices = list(arg["choices"])
@@ -158,7 +168,7 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
                 choices,
                 index=index,
                 help=help_text,
-                key=key,
+                key=_key,
                 format_func=lambda x: "(default)" if x is None else str(x),
             )
 
@@ -173,7 +183,7 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
             text = st.text_input(
                 label,
                 value=", ".join(map(str, defaults)),
-                key=key,
+                key=_key,
                 help=f"{help_text} Enter multiple values separated by commas.",
             )
             raw = [x.strip() for x in text.split(",") if x.strip()]
@@ -187,7 +197,7 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
         elif arg_type in ("int", "float") and default is None:
             # optional number: blank means "use the program default"
             text = st.text_input(
-                label, value="", key=key, help=f"{help_text} (blank = default)"
+                label, value="", key=_key, help=f"{help_text} (blank = default)"
             )
             try:
                 convert = int if arg_type == "int" else float
@@ -203,7 +213,7 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
                     value=int(default),
                     step=1,
                     help=help_text,
-                    key=key,
+                    key=_key,
                     min_value=None if min_value is None else int(min_value),
                 )
             )
@@ -215,7 +225,7 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
                     value=float(default),
                     step=0.1,
                     help=help_text,
-                    key=key,
+                    key=_key,
                     min_value=min_value,
                 )
             )
@@ -225,7 +235,7 @@ def create_cli_inputs(parser, exclude=HANDLED_DESTS):
                 label,
                 value="" if default is None else str(default),
                 help=help_text,
-                key=key,
+                key=_key,
             )
 
         # n_workers_int also rejects 0, which a widget minimum cannot exclude
@@ -266,7 +276,7 @@ def run_analysis(command):
             status_text = st.empty()
             while process.poll() is None:
                 try:
-                    with open(progress_file) as f:
+                    with open(progress_file, "r", encoding="utf-8") as f:
                         percent = int(json.load(f).get("percent", 0))
                     progress_bar.progress(min(percent, 100))
                     status_text.text(f"Analyzing: {percent}%")
@@ -276,10 +286,10 @@ def run_analysis(command):
 
             log_file.flush()
             log_file.seek(0)
-            output = log_file.read()
+            _output = log_file.read()
             progress_bar.empty()
             status_text.empty()
-            return process.returncode, output
+            return process.returncode, _output
         finally:
             for path in (progress_file, log_file.name):
                 if os.path.exists(path):
@@ -345,7 +355,7 @@ def save_uploaded_file(uploaded_file):
     return tmp.name
 
 
-def create_universe(topology_file, trajectory_files):
+def create_universe(_topology_file, _trajectory_files):
     """
     Save the uploads and build an MDAnalysis Universe from them.
 
@@ -358,25 +368,27 @@ def create_universe(topology_file, trajectory_files):
     :rtype: MDAnalysis.Universe
     """
     clear_files()
-    topology_path = save_uploaded_file(topology_file)
+    topology_path = save_uploaded_file(_topology_file)
     trajectory_paths = []
+    loaded = False
     try:
-        for trajectory_file in trajectory_files:
+        for trajectory_file in _trajectory_files:
             trajectory_paths.append(save_uploaded_file(trajectory_file))
-        u = (
+        _u = (
             mda.Universe(topology_path, trajectory_paths)
             if trajectory_paths
             else mda.Universe(topology_path)
         )
-    except Exception:
-        remove_file(topology_path)
-        for path in trajectory_paths:
-            remove_file(path)
-        raise
+        loaded = True
+    finally:
+        if not loaded:
+            remove_file(topology_path)
+            for path in trajectory_paths:
+                remove_file(path)
     st.session_state.topology_path = topology_path
     st.session_state.trajectory_paths = trajectory_paths
-    st.session_state.u = u
-    return u
+    st.session_state.u = _u
+    return _u
 
 
 def validate_atom_selections():
@@ -388,45 +400,53 @@ def validate_atom_selections():
     ``selections_valid``; the validated strings in ``_validated_prot_sel`` /
     ``_validated_gly_sel``, so later edits invalidate them.
     """
-    u = st.session_state.get("u")
+    _u = st.session_state.get("u")
     prot_sel = st.session_state.get("prot_sel", "").strip()
     gly_sel = st.session_state.get("gly_sel", "").strip()
     st.session_state["prot_sel"] = prot_sel
     st.session_state["gly_sel"] = gly_sel
-    if u is None:
+    if _u is None:
         return
 
-    results, passed = {}, True
-    for name, selection in (("Protein", prot_sel), ("Glycan", gly_sel)):
+    validation_results, passed = {}, True
+    for selection_name, selection in (("Protein", prot_sel), ("Glycan", gly_sel)):
         if not selection:
-            results[name] = {"valid": False, "message": "Selection cannot be empty."}
+            validation_results[selection_name] = {
+                "valid": False,
+                "message": "Selection cannot be empty.",
+            }
             passed = False
             continue
+
         try:
-            atoms = u.select_atoms(selection)
-        except Exception as e:  # noqa: BLE001
-            results[name] = {
+            atoms = _u.select_atoms(selection)
+        except SELECTION_ERRORS as e:
+            validation_results[selection_name] = {
                 "valid": False,
                 "message": f"Invalid selection\n\n`{selection}`\n\n{e}",
             }
             passed = False
             continue
+
         if len(atoms) == 0:
-            results[name] = {
+            validation_results[selection_name] = {
                 "valid": False,
                 "message": f"0 atoms selected\n\n`{selection}`",
             }
             passed = False
-        elif name == "Protein" and len(atoms.select_atoms("name CA")) == 0:
-            results[name] = {
+        elif selection_name == "Protein" and len(atoms.select_atoms("name CA")) == 0:
+            validation_results[selection_name] = {
                 "valid": False,
                 "message": f"No CA atoms in\n\n`{selection}`",
             }
             passed = False
         else:
-            results[name] = {"valid": True, "message": f"{len(atoms):,} atoms"}
+            validation_results[selection_name] = {
+                "valid": True,
+                "message": f"{len(atoms):,} atoms",
+            }
 
-    st.session_state["selection_validation_results"] = results
+    st.session_state["selection_validation_results"] = validation_results
     st.session_state["selections_valid"] = passed
     if passed:
         st.session_state["_validated_prot_sel"] = prot_sel
@@ -446,40 +466,45 @@ def zip_directory(path):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(path):
-            for name in files:
-                full = os.path.join(root, name)
+            for _name in files:
+                full = os.path.join(root, _name)
                 zf.write(full, os.path.relpath(full, path))
     return buf.getvalue()
 
 
-def build_command(frame_mode, frames, frame_start, frame_stop, frame_step, cli_inputs):
+def build_command(
+    _frame_mode, _frames, _frame_start, _frame_stop, _frame_step, _cli_inputs
+):
     """
     glyco command line for the current inputs (without ``--outdir``).
 
-    :param str frame_mode: ``'Start / Stop / Step'`` or ``'Frame list'``.
-    :param frames: Frame list (frame-list mode).
-    :param frame_start: Start frame, or None.
-    :param frame_stop: Stop frame, or None.
-    :param frame_step: Step, or None.
-    :param dict cli_inputs: Values from :func:`create_cli_inputs`.
+    :param str _frame_mode: ``'Start / Stop / Step'`` or ``'Frame list'``.
+    :param _frames: Frame list (frame-list mode).
+    :param _frame_start: Start frame, or None.
+    :param _frame_stop: Stop frame, or None.
+    :param _frame_step: Step, or None.
+    :param dict _cli_inputs: Values from :func:`create_cli_inputs`.
     :rtype: list[str]
     """
-    cmd = [*GLYCO_COMMAND, "--top", st.session_state.topology_path]
+    command = [*GLYCO_COMMAND, "--top", st.session_state.topology_path]
     if st.session_state.trajectory_paths:
-        cmd += ["--traj", *st.session_state.trajectory_paths]  # one option, all files
+        command += [
+            "--traj",
+            *st.session_state.trajectory_paths,
+        ]  # one option, all files
 
-    if frame_mode == "Start / Stop / Step":
-        for flag, value in (
-            ("--start", frame_start),
-            ("--stop", frame_stop),
-            ("--step", frame_step),
+    if _frame_mode == "Start / Stop / Step":
+        for flag, _value in (
+            ("--start", _frame_start),
+            ("--stop", _frame_stop),
+            ("--step", _frame_step),
         ):
-            if value is not None:
-                cmd += [flag, str(int(value))]
+            if _value is not None:
+                command += [flag, str(int(_value))]
     else:
-        cmd += ["--frames", *map(str, frames)]
+        command += ["--frames", *map(str, _frames)]
 
-    cmd += [
+    command += [
         "--prot-sel",
         st.session_state.prot_sel,
         "--gly-sel",
@@ -487,23 +512,30 @@ def build_command(frame_mode, frames, frame_start, frame_stop, frame_step, cli_i
     ]
 
     argument_map = {a["dest"]: a for a in get_analysis_arguments(parser)}
-    for dest, value in cli_inputs.items():
+    for dest, _value in _cli_inputs.items():
         arg = argument_map.get(dest)
         if dest in HANDLED_DESTS or arg is None or not arg["option_strings"]:
             continue
         option = max(arg["option_strings"], key=len)
         if arg["action"] == "store_true":
-            if value:
-                cmd.append(option)
+            if _value:
+                command.append(option)
         elif arg["action"] == "store_false":
-            if not value:
-                cmd.append(option)
-        elif isinstance(value, list):
-            if value:
-                cmd += [option, *map(str, value)]
-        elif value is not None and value != "" and value != arg["default"]:
-            cmd += [option, str(value)]
-    return cmd
+            if not _value:
+                command.append(option)
+        elif isinstance(_value, list):
+            if _value:
+                command += [option, *map(str, _value)]
+        elif _value is not None and _value != "" and _value != arg["default"]:
+            command += [option, str(_value)]
+    return command
+
+
+def supported_mdanalysis_formats():
+    """Return supported MDAnalysis topology/trajectory file extensions."""
+    # MDAnalysis exposes the registered formats via private attributes.
+    # pylint: disable=protected-access
+    return [k.lower() for k in mda._PARSERS], [k.lower() for k in mda._READERS]
 
 
 # =====================================================================
@@ -532,32 +564,36 @@ st.title("GlyCo: Glycan Coverage")
 # ---------------------------------------------------------------------
 # 1. Load files
 # ---------------------------------------------------------------------
+
+
 with st.expander("1. Load Structure and Trajectories", expanded=True):
     st.write(
         "Upload an MDAnalysis-compatible topology/structure file and, "
         "optionally, one or more trajectory files."
     )
+    parser_types, reader_types = supported_mdanalysis_formats()
     topology_file = st.file_uploader(
         "Topology / structure file",
         key="topology_upload",
-        type=[k.lower() for k in mda._PARSERS],
+        type=parser_types,
     )
     trajectory_files = st.file_uploader(
         "Trajectory files",
         accept_multiple_files=True,
         key="trajectory_upload",
-        type=[k.lower() for k in mda._READERS],
+        type=reader_types,
     )
 
     if topology_file is not None and st.button("Load Universe", type="primary"):
         try:
             with st.spinner("Loading MDAnalysis Universe..."):
                 create_universe(topology_file, trajectory_files)
+        except LOAD_ERRORS as e:
+            st.error(f"Failed to load Universe: {e}")
+        else:
             clear_results()  # results of the old Universe
             validate_atom_selections()  # selections against the NEW Universe
             st.success("Universe loaded successfully.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Failed to load Universe: {e}")
 
 u = st.session_state.u
 
@@ -756,9 +792,10 @@ if u is not None:
 
         try:
             returncode, output = run_analysis(cmd)
-        except Exception as e:  # noqa: BLE001
+        except RUN_ERRORS as e:
             st.error(f"Failed to run glyco:\n\n{e}")
             st.stop()
+
         st.session_state.last_run = {
             "command": shlex.join(cmd),
             "returncode": returncode,

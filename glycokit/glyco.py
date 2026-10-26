@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ruff: noqa: EXE001
 """
-glyco: GlyCo (GLYcan COverage) of protein surface residues (glycokit).
+GLYCO (GLYcan COverage) of protein surface residues (glycokit).
 
 Counting modes (``--mode`` / ``--blocking``):
 
@@ -16,6 +16,8 @@ v1/box            reproduces the original GLYCO script
 v2/cylinder       reproduces GLYCO-2
 ================  =========================================================
 """
+
+from __future__ import annotations
 
 import collections
 import contextlib
@@ -32,7 +34,7 @@ import platform
 import re
 import sys
 import warnings
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import ProcessPoolExecutor
 from importlib import metadata
 from itertools import chain, repeat
 from pathlib import Path
@@ -45,6 +47,7 @@ from MDAnalysis.analysis.base import AnalysisBase, Results
 from MDAnalysis.guesser.default_guesser import DefaultGuesser
 from MDAnalysis.guesser.tables import vdwradii as VDW_RADII
 from scipy.spatial import cKDTree
+from scipy.stats import t as t_res
 
 from glycokit.console import (
     diagnostic,
@@ -104,6 +107,35 @@ OUTPUT_FILES = {
     "glyco_stats.cxc": "write_chimerax",
     VMD_SCRIPT_NAME: "write_vmd",
 }
+
+# Errors MDAnalysis raises for an invalid or unsupported selection string:
+# SelectionError for parse errors / unknown keywords, NoDataError (a subclass
+# of ValueError and AttributeError) for missing topology attributes such as
+# record_type on non-PDB topologies.
+_SELECTION_ERRORS = (
+    mda.exceptions.SelectionError,
+    mda.exceptions.NoDataError,
+    ValueError,
+    TypeError,
+    AttributeError,
+)
+
+# Errors from building a Universe: missing/unreadable files, unknown formats,
+# malformed records, atom-count mismatches between topology and trajectory.
+_LOAD_ERRORS = (OSError, ValueError, TypeError, IndexError, KeyError, EOFError)
+
+# Errors one structure of an --indir batch may raise without aborting the
+# batch. GlycoAnalysis reports input problems as ValueError, TypeError,
+# IndexError, RuntimeError or FileNotFoundError (an OSError).
+_JOB_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    IndexError,
+    KeyError,
+    RuntimeError,
+    mda.exceptions.SelectionError,
+)
 
 # ---------------------------------------------------------------------------
 # warnings
@@ -569,7 +601,7 @@ def _warn_ignored_options(cfg, blocking):
         )
 
 
-def validate_arguments(cfg, error, check_inputs=True, warn=True):
+def validate_arguments(cfg, fail, check_inputs=True, warn=True):
     """
     Validate and normalize run parameters.
 
@@ -579,7 +611,7 @@ def validate_arguments(cfg, error, check_inputs=True, warn=True):
 
     :param cfg: Parameters to validate (modified in place).
     :type cfg: argparse.Namespace or GlycoAnalysis
-    :param callable error: Called with a message on invalid input; must not
+    :param callable fail: Called with a message on invalid input; must not
         return.
     :param bool check_inputs: Also validate input files / directories.
     """
@@ -590,47 +622,47 @@ def validate_arguments(cfg, error, check_inputs=True, warn=True):
 
     if check_inputs:
         if not top_given and not indir_given:
-            error("one of -a/--top(+-b/--traj) or --indir must be given")
+            fail("one of -a/--top(+-b/--traj) or --indir must be given")
         if indir_given and (top_given or traj_given):
-            error("--indir is mutually exclusive with -a/--top and -b/--traj")
+            fail("--indir is mutually exclusive with -a/--top and -b/--traj")
         if traj_given and not top_given:
-            error("-b/--traj requires -a/--top")
+            fail("-b/--traj requires -a/--top")
 
         if top_given:
             if not os.path.isfile(cfg.top):
-                error(f"-a/--top: no such file: {cfg.top!r}")
+                fail(f"-a/--top: no such file: {cfg.top!r}")
             for t in cfg.traj or []:
                 if not os.path.isfile(t):
-                    error(f"-b/--traj: no such file: {t!r}")
+                    fail(f"-b/--traj: no such file: {t!r}")
         else:
             if not os.path.isdir(cfg.indir):
-                error(f"--indir: no such directory: {cfg.indir!r}")
+                fail(f"--indir: no such directory: {cfg.indir!r}")
             extensions = [
                 e.strip().lstrip(".") for e in cfg.in_types.split(",") if e.strip()
             ]
             structures = find_structures(cfg.indir, extensions)
             if not structures:
-                error(
+                fail(
                     f"--indir: no files with extension(s) {extensions} "
                     f"found in {cfg.indir!r}"
                 )
             cfg.structures = structures
 
     if not (cfg.gly_sel or "").strip():
-        error("--gs/--gly-sel is required (MDAnalysis selection of the glycan atoms)")
+        fail("--gs/--gly-sel is required (MDAnalysis selection of the glycan atoms)")
 
     # counting mode and blocking test
     if cfg.mode not in _BLOCKING_TESTS:
-        error(f"--mode must be one of {sorted(_BLOCKING_TESTS)}, got {cfg.mode!r}")
+        fail(f"--mode must be one of {sorted(_BLOCKING_TESTS)}, got {cfg.mode!r}")
     allowed = _BLOCKING_TESTS[cfg.mode]
     if cfg.blocking is not None and cfg.blocking not in allowed:
-        error(
+        fail(
             f"--blocking {cfg.blocking} is not available with --mode {cfg.mode} "
             f"(allowed: {', '.join(allowed)})"
         )
     blocking = cfg.blocking or allowed[0]
     if blocking == "box" and cfg.write_blockers:
-        error(
+        fail(
             "--write-blockers is not supported with --mode v1 (the box test "
             "does not identify blocking atoms); --write-excluded is supported"
         )
@@ -650,16 +682,16 @@ def validate_arguments(cfg, error, check_inputs=True, warn=True):
     )
     frames_given = bool(cfg.frame_list)
     if frames_given and slice_given:
-        error("--frames is not allowed with --start/--stop/--step")
+        fail("--frames is not allowed with --start/--stop/--step")
 
     if indir_given and (frames_given or slice_given):
-        error(
+        fail(
             "--frames/--start/--stop/--step are not meaningful with --indir "
             "(each structure is a single, independent frame)"
         )
 
     if cfg.frame_step is not None and cfg.frame_step == 0:
-        error("--step cannot be 0")
+        fail("--step cannot be 0")
 
     start, stop, step = cfg.frame_start, cfg.frame_stop, cfg.frame_step
     if (
@@ -670,15 +702,17 @@ def validate_arguments(cfg, error, check_inputs=True, warn=True):
         and (step is None or step > 0)
         and start >= stop
     ):
-        error(f"--start ({start}) must be less than --stop ({stop})")
+        fail(f"--start ({start}) must be less than --stop ({stop})")
 
     if frames_given:
         try:
             frame_ints = [int(f) for f in cfg.frame_list]
-        except (TypeError, ValueError):
-            error(f"--frames must be integers, got {cfg.frame_list!r}")
+        except (TypeError, ValueError) as exc:
+            fail(f"--frames must be integers, got {cfg.frame_list!r}")
+            raise AssertionError("error() must not return") from exc  # unreachable
+
         if any(f < 0 for f in frame_ints):
-            error("--frames must be non-negative")
+            fail("--frames must be non-negative")
         cfg.frame_list = frame_ints
     else:
         cfg.frame_list = None
@@ -694,14 +728,14 @@ def validate_arguments(cfg, error, check_inputs=True, warn=True):
     for name, flag in positive.items():
         value = getattr(cfg, name)
         if value is not None and not value > 0:
-            error(f"{flag} must be positive, got {value}")
+            fail(f"{flag} must be positive, got {value}")
 
     if cfg.vdw_probe is not None and not cfg.vdw_probe >= 0:
-        error(f"--vdw-probe must be non-negative, got {cfg.vdw_probe}")
+        fail(f"--vdw-probe must be non-negative, got {cfg.vdw_probe}")
 
     n = cfg.n_workers
     if isinstance(n, bool) or not isinstance(n, int) or (n != -1 and n < 1):
-        error(f"--n-workers must be -1 or an integer >= 1, got {n!r}")
+        fail(f"--n-workers must be -1 or an integer >= 1, got {n!r}")
 
     if warn:
         _warn_ignored_options(cfg, blocking)
@@ -798,7 +832,7 @@ def load_universe(top, traj=None):
 
 class GlycoAnalysis(AnalysisBase):
     """
-    GlyCo (Glycan Coverage): glycan coverage of protein surface residues.
+    GLYCO (Glycan Coverage): glycan coverage of protein surface residues.
 
     Counting modes (``mode`` / ``blocking``):
 
@@ -824,8 +858,9 @@ class GlycoAnalysis(AnalysisBase):
 
     Results (after :meth:`run`) are in ``results``: ``glycan_counts`` and
     ``sasa`` (shape (n_frames, n_residues), columns follow ``prot_atoms``),
-    ``n_surface_residues``, ``n_blocked_pairs``, ``mean_blocked_distance``
-    and ``trajectory_frames``.
+    ``n_surface_residues``, ``n_blocked_pairs``, ``mean_blocked_distance``,
+    ``trajectory_frames``, ``count_values`` (shape (n_values,)) and
+    ``residue_histograms`` (shape (n_residues, n_values)).
 
     :param u: Universe to analyze.
     :type u: MDAnalysis.Universe
@@ -836,7 +871,40 @@ class GlycoAnalysis(AnalysisBase):
     :raises ValueError: On invalid parameters or selections.
     """
 
+    # region init
+
     _analysis_algorithm_is_parallelizable = False
+
+    # Parameters set by _apply_params from base_parser() destinations.
+    # Declared here for linters and readers; values come from the parser.
+    mode: str
+    blocking: str | None
+    n_workers: int
+    top: str | None
+    traj: list[str] | None
+    indir: str | None
+    outdir: str
+    prot_sel: str
+    gly_sel: str
+    block_sel: str
+    sasa_env: str | None
+    sasa_hetatm: bool
+    sasa_probe: float
+    area_cutoff: float
+    distance_cutoff: float
+    cylinder_radius: float
+    vdw_scale: float
+    vdw_probe: float
+    frame_start: int | None
+    frame_stop: int | None
+    frame_step: int | None
+    frame_list: list[int] | None
+    bfactor_frame: int | None
+    write_excluded: bool
+    write_blockers: bool
+    write_vmd: bool
+    write_stats: bool
+    write_chimerax: bool
 
     @classmethod
     def get_supported_backends(cls):
@@ -860,6 +928,24 @@ class GlycoAnalysis(AnalysisBase):
         self._blocker_radii = None
         self._start_residue_keys = None
         self._blocker_residue_keys = None
+
+        # state built in _prepare
+        self.frame_count = 0
+        self._output_k = None
+        self._mode = self._blocking = None
+        self._legacy = False
+        self.prot_atoms = self.blocker_atoms = self.gly_atoms = self.start_atoms = None
+        self.residue_areas = (
+            None  # _require_run() relies on this being None before run()
+        )
+        self._start_residue_atoms = None
+        self._residue_resindices = None
+        self._n_res_rows = None
+        self._blocker_resindex = None
+        self._prot_atom_res_row = None
+        self._start_res_row = None
+        self._start_resindex = None
+        self._progress_every = None
 
         # Single source of truth for defaults: base_parser(), parsed once.
         defaults = _parser_defaults()
@@ -887,7 +973,11 @@ class GlycoAnalysis(AnalysisBase):
         """
         return cls(u, verbose=verbose, _parser=parser, _args=args, **overrides)
 
-    # -- mode resolution ----------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region Mode Resolution
+    # ------------------------------------------------------------
 
     def _resolve_test(self, mode=None, blocking=None):
         """
@@ -944,7 +1034,11 @@ class GlycoAnalysis(AnalysisBase):
         """
         return {"workers": self._n_workers(), "return_sorted": False}
 
-    # -- configuration ------------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region Configuration
+    # --------------------------------------------------------------
 
     def _apply_params(self, defaults, args, kwargs):
         """
@@ -1021,21 +1115,33 @@ class GlycoAnalysis(AnalysisBase):
             self, self._error, check_inputs=not library_mode, warn=not self._from_cli
         )
 
-    def run(self, start=None, stop=None, step=None, frames=None, write=True, **kwargs):
+    def run(
+        self,
+        start=None,
+        stop=None,
+        step=None,
+        frames=None,
+        verbose=None,
+        n_workers=None,
+        n_parts=None,
+        backend=None,
+        *,
+        unsupported_backend=False,
+        progressbar_kwargs=None,
+        write=True,
+    ):
         """
-        :meth:`AnalysisBase.run`, falling back to the CLI frame slice.
+        Run the analysis; see :meth:`MDAnalysis.analysis.base.AnalysisBase.run`.
 
-        :param start: First frame.
-        :type start: int or None
-        :param stop: Stop frame (exclusive).
-        :type stop: int or None
-        :param step: Frame step.
-        :type step: int or None
-        :param frames: Explicit frame indices.
-        :type frames: list[int] or None
-        :param bool write: Write the output files in ``outdir``; with False
+        Differences from the base class:
+
+        * If ``start``, ``stop``, ``step`` and ``frames`` are all None, the
+        frame selection given at construction (``frame_start``,
+        ``frame_stop``, ``frame_step``, ``frame_list``) is used.
+        * The same frame selection is used for the FreeSASA pass.
+
+        :param bool write: Write the output files to ``outdir``; with False
             only ``results`` is filled (the writers stay callable).
-        :param kwargs: Passed to :meth:`AnalysisBase.run`.
         :rtype: GlycoAnalysis
         """
         if all(v is None for v in (start, stop, step, frames)):
@@ -1043,7 +1149,15 @@ class GlycoAnalysis(AnalysisBase):
             frames = self.frame_list
         self._run_slice = {"start": start, "stop": stop, "step": step, "frames": frames}
         self._write_outputs = bool(write)
-        return super().run(**self._run_slice, **kwargs)
+        return super().run(
+            **self._run_slice,
+            verbose=verbose,
+            n_workers=n_workers,
+            n_parts=n_parts,
+            backend=backend,
+            unsupported_backend=unsupported_backend,
+            progressbar_kwargs=progressbar_kwargs,
+        )
 
     def _compat_selection(self, sel, blockers=False, mode=None):
         """
@@ -1068,7 +1182,7 @@ class GlycoAnalysis(AnalysisBase):
             try:
                 self.u.select_atoms(candidate)
                 return candidate
-            except Exception:  # noqa: BLE001
+            except _SELECTION_ERRORS:
                 warnings.warn(
                     "record_type is unavailable for this topology; "
                     "v1 blockers are NOT restricted to ATOM records",
@@ -1107,7 +1221,7 @@ class GlycoAnalysis(AnalysisBase):
                 continue
             try:
                 atoms = self.u.select_atoms(f"({selection})")
-            except Exception as e:  # noqa: BLE001
+            except _SELECTION_ERRORS as e:
                 results[name] = {
                     "valid": False,
                     "message": f"Invalid selection ('{selection}'): {e}",
@@ -1146,7 +1260,7 @@ class GlycoAnalysis(AnalysisBase):
         if self.sasa_env:
             try:
                 self.u.select_atoms(f"({self.sasa_env})")
-            except Exception as e:  # noqa: BLE001
+            except _SELECTION_ERRORS as e:
                 self._error(f"invalid --sasa-env selection ('{self.sasa_env}'): {e}")
 
     def selection_report(self):
@@ -1161,7 +1275,11 @@ class GlycoAnalysis(AnalysisBase):
             lines.append(f"  {name}: {flag} - {r['message']}")
         return "\n".join(lines)
 
-    # -- FreeSASA setup -------------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region FreeSASA setup
+    # -------------------------------------------------------------
 
     def _sasa_atoms(self):
         """
@@ -1179,7 +1297,7 @@ class GlycoAnalysis(AnalysisBase):
             sel = "all" if self.sasa_hetatm else "record_type ATOM"
             try:
                 return _first_altloc(heavy_atoms(self.u.select_atoms(sel)))
-            except Exception as e:  # noqa: BLE001
+            except _SELECTION_ERRORS as e:
                 self._error(
                     "could not build the legacy FreeSASA atom set "
                     f"(needs PDB record types; use --sasa-env): {e}"
@@ -1221,10 +1339,16 @@ class GlycoAnalysis(AnalysisBase):
                 "Add their atoms to the SASA set (e.g. with --sasa-env)"
             )
 
-    # -- run lifecycle -------------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region Run Lifecycle
+    # -------------------------------------------------------------
 
     def _prepare(self):
         """Build atom groups, run FreeSASA and allocate results (AnalysisBase hook)."""
+        # pylint: disable=too-many-locals,too-many-statements
+
         self.frame_count = 0
         # fail on a bad --bfactor-frame before the (slow) FreeSASA pass
         self._output_k = self._resolve_frame_index(self.bfactor_frame)
@@ -1424,7 +1548,12 @@ class GlycoAnalysis(AnalysisBase):
             self._write_progress(self.frame_count, self.n_frames)
 
     def _conclude(self):
-        """Write the requested output files (AnalysisBase hook)."""
+        """Store the residue histograms and write the requested output files."""
+        (
+            self.results.count_values,
+            self.results.residue_histograms,
+        ) = self._compute_residue_histograms()
+
         if self._write_outputs:
             os.makedirs(self.outdir, exist_ok=True)
             heading(f"Writing results to {style(self.outdir + '/', 'cyan')}")
@@ -1452,7 +1581,11 @@ class GlycoAnalysis(AnalysisBase):
             self.write_run_config()
         self._frame_cache = None
 
-    # -- geometry ------------------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region Geometry
+    # ------------------------------------------------------------
 
     def surface_residue_rows(self, frame_index=None):
         """
@@ -1837,7 +1970,12 @@ class GlycoAnalysis(AnalysisBase):
             )
         ]
 
-    # -- visibility -----------------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region Visibility
+    # -------------------------------------------------------------
+
     def _visibility(self, start_idx, mode, blocking, **ctx_kwargs):
         """
         Residue-level visibility for the current trajectory frame.
@@ -1984,17 +2122,22 @@ class GlycoAnalysis(AnalysisBase):
             counts = per_res[self._prot_atom_res_row].astype(np.int64)
         return counts
 
-    # -- frame access ---------------------------------------------------------
+    # endregion
+
+    # -------------------------------------------------------------
+    # region Frame Access
+    # -------------------------------------------------------------
 
     @contextlib.contextmanager
     def _at_analyzed_frame(self, k):
         """Temporarily move the trajectory to analyzed frame ``k``."""
         old = int(self.u.trajectory.frame)
         try:
-            self.u.trajectory[int(self._analyzed_frames()[k])]
+            self.u.trajectory[int(self._analyzed_frames()[k])]  # pylint: disable=expression-not-assigned
+
             yield
         finally:
-            self.u.trajectory[old]
+            self.u.trajectory[old]  # pylint: disable=pointless-statement
 
     def _analyzed_frames(self):
         """
@@ -2079,28 +2222,65 @@ class GlycoAnalysis(AnalysisBase):
             )
         return start_idx, cand, vis, blockers, dists
 
-    # -- output helpers ---------------------------------------------------------
+    # endregion
+
+    # ---------------------------------------------------------
+    # region Output Helpers
+    # ---------------------------------------------------------
+
+    def residue_identity(self):
+        """
+        (chain, resid+icode, resname) of every ``prot_atoms`` column, exactly as
+        written in the CSV outputs.
+
+        :rtype: list[tuple[str, str, str]]
+        """
+        _, (chains, resids, resnames) = self._identity_columns(
+            self.prot_atoms, atoms=False
+        )
+        return [(str(c), str(r), str(n)) for c, r, n in zip(chains, resids, resnames)]
+
+    def _compute_residue_histograms(self):
+        """
+        Histograms of the per-frame glycan counts, computed from ``all_counts``.
+
+        :return: ``(values, hist)``; see :meth:`residue_histograms`.
+        :rtype: tuple[numpy.ndarray, numpy.ndarray]
+        """
+        counts = np.asarray(self.all_counts, dtype=np.int64)  # (n_frames, n_res)
+        _, n_res = counts.shape
+        values = np.arange(int(counts.max(initial=0)) + 1)
+        hist = np.zeros((n_res, len(values)), dtype=np.int64)
+        rows = np.broadcast_to(np.arange(n_res), counts.shape)
+        np.add.at(hist, (rows.ravel(), counts.ravel()), 1)
+        # read-only: the stored arrays are shared by every caller
+        values.flags.writeable = False
+        hist.flags.writeable = False
+        return values, hist
 
     def residue_histograms(self):
         """
         Histogram of every residue's glycan count over the analyzed frames.
 
-        Counts are integers, so there is one bin per count value.
+        Computed once at the end of :meth:`run` and stored in
+        ``results.count_values`` / ``results.residue_histograms``. Counts are
+        integers, so there is one bin per count value.
 
         :return: ``(values, hist)``: ``values`` are the count values
             ``0 .. max``; ``hist[i, v]`` is the number of frames in which
             residue ``i`` (``prot_atoms`` order) had count ``values[v]``.
+            Both arrays are read-only.
         :rtype: tuple[numpy.ndarray, numpy.ndarray]
-        :raises RuntimeError: Before :meth:`run`.
+        :raises RuntimeError: Before :meth:`run` has finished.
         """
         self._require_run()
-        counts = np.asarray(self.all_counts, dtype=np.int64)  # (n_frames, n_res)
-        n_frames, n_res = counts.shape
-        values = np.arange(int(counts.max(initial=0)) + 1)
-        hist = np.zeros((n_res, len(values)), dtype=np.int64)
-        rows = np.broadcast_to(np.arange(n_res), counts.shape)
-        np.add.at(hist, (rows.ravel(), counts.ravel()), 1)
-        return values, hist
+        try:
+            return self.results.count_values, self.results.residue_histograms
+        except AttributeError:
+            raise RuntimeError(
+                f"{type(self).__name__}.residue_histograms() is available "
+                "after run() has finished"
+            ) from None
 
     def residue_statistics(self, confidence=0.95, method="percentile"):
         """
@@ -2132,9 +2312,7 @@ class GlycoAnalysis(AnalysisBase):
             )
         elif method == "mean":
             if n > 1:
-                from scipy.stats import t
-
-                half = t.ppf(1 - alpha, n - 1) * std / np.sqrt(n)
+                half = t_res.ppf(1 - alpha, n - 1) * std / np.sqrt(n)
             else:
                 half = np.zeros_like(mean)
             lower, upper = mean - half, mean + half
@@ -2226,12 +2404,14 @@ class GlycoAnalysis(AnalysisBase):
             self.u.add_TopologyAttr("occupancies")
 
     @staticmethod
-    def _strip_placeholder_cryst1(path, universe):
+    def _strip_placeholder_cryst1(path, dims):
         """Remove the 1 A CRYST1 MDAnalysis writes for a Universe without a box."""
-        dims = universe.dimensions
         if dims is None or np.allclose(np.asarray(dims[:3]), 1.0):
-            lines = path.read_text().splitlines(keepends=True)
-            path.write_text("".join(l for l in lines if not l.startswith("CRYST1")))
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            path.write_text(
+                "".join(line for line in lines if not line.startswith("CRYST1")),
+                encoding="utf-8",
+            )
 
     def write_statistics_pdb(
         self, frame_index=None, output=None, confidence=0.95, method="percentile"
@@ -2281,12 +2461,15 @@ class GlycoAnalysis(AnalysisBase):
             self.u.atoms.occupancies = np.zeros(self.u.atoms.n_atoms)
             atoms.tempfactors = stats["mode"][cols]
             atoms.occupancies = stats["width"][cols]
-            with self._at_analyzed_frame(k):
-                self.u.atoms.write(str(output))
         finally:
             self.u.atoms.tempfactors = old_bf
             self.u.atoms.occupancies = old_occ
-        self._strip_placeholder_cryst1(output, self.u)
+
+        with self._at_analyzed_frame(k):
+            self.u.atoms.write(str(output))
+            dims = self.u.dimensions
+        self._strip_placeholder_cryst1(output, dims)
+
         written("Trajectory statistics PDB", output, base=self.outdir)
         return output
 
@@ -2344,7 +2527,7 @@ class GlycoAnalysis(AnalysisBase):
         path = structure.as_posix().replace('"', '\\"')
         r0, r1 = worm_radii
         lines = [
-            "# Auto-generated by glyco (GlyCo): trajectory statistics",
+            "# Auto-generated by glyco (GLYCO): trajectory statistics",
             f"# B-factor  = histogram maximum, colored white (0) -> red ({bmax:g})",
             "# occupancy = width of the 95% interval of the glycan count",
             "close session",
@@ -2358,7 +2541,7 @@ class GlycoAnalysis(AnalysisBase):
             "view",
         ]
         output = self._output_path(output, "glyco_stats.cxc")
-        output.write_text("\n".join(lines) + "\n")
+        output.write_text("\n".join(lines) + "\n", encoding="utf-8")
         written("ChimeraX script", output, base=self.outdir)
         return output
 
@@ -2372,13 +2555,13 @@ class GlycoAnalysis(AnalysisBase):
         :param int max_plots: Maximum number of residues plotted.
         :rtype: pathlib.Path
         """
-        import matplotlib.pyplot as plt
+        import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
 
         values, hist = self.residue_histograms()
         stats = self.residue_statistics()
         if residues is None:
             residues = np.argsort(stats["width"])[::-1][:max_plots]
-        names, cols = self._identity_columns(self.prot_atoms, atoms=False)
+        _, cols = self._identity_columns(self.prot_atoms, atoms=False)
         n = len(residues)
         fig, axes = plt.subplots(
             (n + 3) // 4,
@@ -2482,7 +2665,11 @@ class GlycoAnalysis(AnalysisBase):
         except (AttributeError, mda.exceptions.NoDataError):
             self.u.add_TopologyAttr("tempfactors")
 
-    # -- writers --------------------------------------------------------------
+    # endregion
+
+    # --------------------------------------------------------------
+    # region Writers
+    # --------------------------------------------------------------
 
     def _output_frame(self, frame_index):
         """
@@ -2517,7 +2704,7 @@ class GlycoAnalysis(AnalysisBase):
         """
         output = self._output_path(output, default_name)
         n = 0
-        with output.open("w", newline="") as handle:
+        with output.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(header)
             for batch in batches:
@@ -2615,10 +2802,7 @@ class GlycoAnalysis(AnalysisBase):
         with self._at_analyzed_frame(k):
             self.u.atoms.write(str(output))
             dims = self.u.dimensions
-            no_box = dims is None or np.allclose(np.asarray(dims[:3]), 1.0)
-        if no_box:
-            lines = output.read_text().splitlines(keepends=True)
-            output.write_text("".join(l for l in lines if not l.startswith("CRYST1")))
+        self._strip_placeholder_cryst1(output, dims)
 
         np.save(output.with_suffix(".npy"), self.all_counts)
         written("B-factors", output, base=self.outdir)
@@ -2809,7 +2993,7 @@ class GlycoAnalysis(AnalysisBase):
         self._require_run()
         output = self._output_path(output, "run_config.json")
         config = {
-            "program": "glyco (GlyCo, GLYcan COverage)",
+            "program": "glyco (GLYCO, GLYcan COverage)",
             "mode": self._mode,
             "blocking": self._blocking,
             "effective_selections": {
@@ -2821,7 +3005,7 @@ class GlycoAnalysis(AnalysisBase):
             "trajectory_frames": self._analyzed_frames().tolist(),
             "versions": _package_versions(),
         }
-        output.write_text(json.dumps(config, indent=2, default=str))
+        output.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
         written("Run configuration", output, base=self.outdir)
         return output
 
@@ -2831,7 +3015,7 @@ class GlycoAnalysis(AnalysisBase):
         if not self.progress_file:
             return
         temp_file = self.progress_file + ".tmp"
-        with open(temp_file, "w") as f:
+        with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "current": current,
@@ -2918,7 +3102,7 @@ class GlycoAnalysis(AnalysisBase):
         data_max = float(counts.max()) if counts.size and counts.max() > 0 else 1.0
 
         lines = [
-            "# Auto-generated by glyco (GlyCo)",
+            "# Auto-generated by glyco (GLYCO)",
             "# Bulk per-frame assignment of residue values",
             "",
             f"set molid [mol new {self._tcl_quote(topology.as_posix())} waitfor all]",
@@ -2972,9 +3156,11 @@ class GlycoAnalysis(AnalysisBase):
         ]
 
         output = self._output_path(output, VMD_SCRIPT_NAME)
-        output.write_text("\n".join(lines))
+        output.write_text("\n".join(lines), encoding="utf-8")
         written("VMD script", output, base=self.outdir)
         return output
+
+    # endregion
 
 
 # ---------------------------------------------------------------------------
@@ -2986,7 +3172,7 @@ def _run_job(args, top, traj, outdir, verbose, parser=None):
     """Load one structure, run the analysis and write its outputs."""
     try:
         u = load_universe(top, traj)
-    except Exception as e:
+    except _LOAD_ERRORS as e:
         msg = (
             f"could not load {top}"
             + (
@@ -3002,7 +3188,7 @@ def _run_job(args, top, traj, outdir, verbose, parser=None):
         raise ValueError(msg) from e
     GlycoAnalysis.from_args(
         u, args, parser=parser, top=top, traj=traj, indir=None, outdir=outdir
-    ).run(verbose=verbose, progressbar_kwargs={"desc": "Running GlyCo Analysis"})
+    ).run(verbose=verbose, progressbar_kwargs={"desc": "Running GLYCO Analysis"})
 
 
 def _structure_outdirs(structures, base_outdir):
@@ -3055,7 +3241,7 @@ def main(argv=None):
                 continue
             try:
                 _run_job(args, path, None, outdir, verbose)
-            except Exception as e:  # noqa: BLE001
+            except _JOB_ERRORS as e:
                 error(f"{path}: {e}")
                 failures.append((path, str(e)))
 

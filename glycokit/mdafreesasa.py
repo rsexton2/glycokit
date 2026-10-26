@@ -126,6 +126,22 @@ class FreesasaAnalysis(AnalysisBase):
         self.ag = ag
         self.probe_radius = probe_radius
         self.keep_atom_areas = keep_atom_areas
+        self.params = None
+        # Populated by _setup_atoms during the AnalysisBase preparation hook.
+        self._atom_names = None
+        self._atom_resnames = None
+        self._atom_resnums = None
+        self._atom_chains = None
+        self._unique_resindices = None
+        self._resindex_inverse = None
+        self._residue_keys = None
+        self.n_guessed_radii = 0
+        self.n_vdw_radii = 0
+        self._fixed_radii = None
+        self._radii = None
+        self.structure_valid = None
+        self.structure_message = None
+        self.radii_source = None
 
     def __getstate__(self):
         """

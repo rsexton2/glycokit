@@ -17,7 +17,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from MDAnalysis.coordinates.memory import MemoryReader
 
+from glycokit.glyco import GlycoAnalysis, _parser_defaults
 from glycokit.tests.glyco_cases import MODE_SPECS
 from glycokit.tests.sasa_probe import capture
 
@@ -42,6 +44,18 @@ BLOCKER_MODES = ("default", "default-cylinder", "v2")
 # --------------------------------------------------------------------------
 
 
+def _analyzed(analysis):
+    """Trajectory frame index of each analyzed frame (public result)."""
+    return np.asarray(analysis.results.trajectory_frames)
+
+
+def _last_analyzed(run):
+    analyzed = _analyzed(run.analysis)
+    if len(analyzed) < 2:
+        pytest.skip("needs at least two analysed frames")
+    return len(analyzed) - 1, int(analyzed[-1])
+
+
 def file_digest(path, algorithm="sha256"):
     """Streamed digest; memory use does not depend on file size."""
     with open(path, "rb") as fh:
@@ -50,7 +64,10 @@ def file_digest(path, algorithm="sha256"):
 
 def _first_difference(a, b, width=200):
     """(line number, line in a, line in b) of the first difference, streamed."""
-    with open(a, newline="") as fa, open(b, newline="") as fb:
+    with (
+        open(a, newline="", encoding="utf-8") as fa,
+        open(b, newline="", encoding="utf-8") as fb,
+    ):
         for n, (la, lb) in enumerate(itertools.zip_longest(fa, fb), 1):
             if la != lb:
                 return (
@@ -84,7 +101,7 @@ def assert_same_file(a, b, label=None):
 
 def iter_csv(path):
     """Stream CSV rows instead of materialising the whole file."""
-    with open(path, newline="") as handle:
+    with open(path, newline="", encoding="utf-8") as handle:
         yield from csv.DictReader(handle)
 
 
@@ -93,16 +110,13 @@ def iter_csv(path):
 # --------------------------------------------------------------------------
 
 
-def ca_keys(glyco, analysis):
+def ca_keys(analysis):
     """(chain, resid+icode, resname) of every CA column, as the CSVs write them."""
-    chains = analysis._atom_attr(analysis.prot_atoms, "chainIDs")
-    labels = glyco._resid_labels(analysis.prot_atoms)
-    names = analysis._atom_attr(analysis.prot_atoms, "resnames")
-    return [(str(c), str(l), str(n)) for c, l, n in zip(chains, labels, names)]
+    return analysis.residue_identity()
 
 
-def unique_ca_keys(glyco, analysis):
-    keys = ca_keys(glyco, analysis)
+def unique_ca_keys(analysis):
+    keys = ca_keys(analysis)
     if len(set(keys)) != len(keys):
         pytest.skip(
             "(chain, resid, resname) is not unique for this structure; "
@@ -120,7 +134,7 @@ def _last_counts(analysis):
 
 
 def _last_analyzed(run):
-    analyzed = run.analysis._analyzed_frames()
+    analyzed = _analyzed(run.analysis)
     if len(analyzed) < 2:
         pytest.skip("needs at least two analysed frames")
     return len(analyzed) - 1, int(analyzed[-1])
@@ -154,6 +168,93 @@ def _mode_cli_args(mode):
 # --------------------------------------------------------------------------
 
 
+@pytest.fixture(name="first_case")
+def fixture_first_case(pytestconfig):
+    """The first configured structure; skips without structures."""
+    if not pytestconfig.glyco_cases:
+        pytest.skip("no structures given")
+    return pytestconfig.glyco_cases[0]
+
+
+def _make_analysis(glyco, glyco_params, case, universe=None, **overrides):
+    """GlycoAnalysis for ``case`` with the case parameters plus ``overrides``."""
+    if universe is None:
+        universe = glyco.load_universe(case.top, list(case.traj) or None)
+    return glyco.GlycoAnalysis(universe, **{**glyco_params(case), **overrides})
+
+
+def test_parameters_are_declared():
+    """Every base_parser() destination has a class annotation (keeps E1101 meaningful)."""
+    declared = set(vars(GlycoAnalysis).get("__annotations__", {}))
+    destinations = set(_parser_defaults())
+    missing = sorted(destinations - declared)
+    stale = sorted(declared - destinations)
+    assert not missing, f"parser destinations without an annotation: {missing}"
+    assert not stale, f"annotations that are not parser destinations: {stale}"
+
+
+def test_histograms_stored_once(glyco, glyco_params, first_case):
+    """The histograms are stored in results and reused by every caller."""
+    analysis = _make_analysis(glyco, glyco_params, first_case)
+    analysis.run(frames=[0], write=False)
+
+    values, hist = analysis.residue_histograms()
+    again_values, again_hist = analysis.residue_histograms()
+
+    assert hist is again_hist is analysis.results.residue_histograms
+    assert values is again_values is analysis.results.count_values
+    assert hist.shape[0] == len(analysis.prot_atoms)
+    assert not hist.flags.writeable
+
+
+def test_histograms_before_run_raise(glyco, glyco_params, first_case):
+    """residue_histograms() needs a finished run."""
+    analysis = _make_analysis(glyco, glyco_params, first_case)
+    with pytest.raises(RuntimeError):
+        analysis.residue_histograms()
+
+
+def test_invalid_selection_reports_value_error(glyco, glyco_params, first_case):
+    """An invalid selection is reported as ValueError, not an MDAnalysis error."""
+    with pytest.raises(ValueError, match="invalid atom selection"):
+        _make_analysis(glyco, glyco_params, first_case, gly_sel="nosuchkeyword FOO")
+
+
+def test_v1_without_record_types_warns(glyco, glyco_params, first_case):
+    """v1 blockers fall back to all records when record_type is missing."""
+    u = glyco.load_universe(first_case.top, list(first_case.traj) or None)
+    if hasattr(u.atoms, "record_types"):
+        u.del_TopologyAttr("record_types")
+    with pytest.warns(UserWarning, match="record_type is unavailable"):
+        _make_analysis(glyco, glyco_params, first_case, universe=u, mode="v1")
+
+
+def test_bad_trajectory_load_cli_exit(
+    glyco, glyco_cli_args, pytestconfig, tmp_path, capsys
+):
+    """Through main(), an unreadable trajectory is a usage error (exit 2)."""
+    if not pytestconfig.glyco_cases:
+        pytest.skip("no structures given")
+    case = pytestconfig.glyco_cases[0]
+
+    bad = tmp_path / "bad.xtc"
+    bad.write_bytes(b"not a trajectory")
+    argv = [
+        "-a",
+        case.top,
+        "-b",
+        str(bad),
+        *glyco_cli_args(case),
+        "-o",
+        str(tmp_path / "out"),
+        "--force",
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        glyco.main(argv)
+    assert exc_info.value.code == 2
+    assert "could not load" in capsys.readouterr().err
+
+
 def test_unknown_parameter_rejected(glyco, glyco_params, pytestconfig):
     """Typos in keyword arguments fail instead of being ignored."""
     if not pytestconfig.glyco_cases:
@@ -175,11 +276,11 @@ def test_outputs(case, mode, runner):
     missing = [f for f in EXPECTED_FILES if not (r.outdir / f).is_file()]
     assert not missing, f"missing output files: {missing}"
 
-    config = json.loads((r.outdir / "run_config.json").read_text())
+    config = json.loads((r.outdir / "run_config.json").read_text(encoding="utf-8"))
     glyco_mode, blocking = MODE_SPECS[mode]
     assert config["mode"] == glyco_mode
     assert config["blocking"] == (blocking or RESOLVED_BLOCKING[glyco_mode])
-    assert config["trajectory_frames"] == r.analysis._analyzed_frames().tolist()
+    assert config["trajectory_frames"] == _analyzed(r.analysis).tolist()
 
 
 def test_counts_valid(case, mode, runner):
@@ -200,17 +301,18 @@ def test_buried_residues_have_zero_count(case, mode, runner):
 def test_frame_summary(case, mode, runner):
     r = runner(case, mode)
     a = r.analysis
-    analyzed = a._analyzed_frames().tolist()
-    areas = np.asarray(a.residue_areas)
+    analyzed = _analyzed(a).tolist()
     n_rows = 0
     for k, row in enumerate(iter_csv(r.outdir / "frame_summary.csv")):
         assert k < a.n_frames, f"frame_summary.csv has more than {a.n_frames} rows"
         assert int(row["analyzed_frame"]) == k
         assert int(row["trajectory_frame"]) == analyzed[k]
         assert int(row["n_surface_residues"]) == a.results.n_surface_residues[k]
-        surface_rows = np.flatnonzero(areas[k] >= a.area_cutoff)
-        expected = int(np.isin(surface_rows, a._start_res_row).sum())
+
+        start_idx = a.surface_start_indices(k)
+        expected = len(np.unique(a.start_atoms.resindices[start_idx]))
         assert a.results.n_surface_residues[k] == expected
+
         n_blocked = int(row["n_blocked_pairs"])
         mean_d = float(row["mean_blocked_distance"])
         assert n_blocked >= 0
@@ -226,12 +328,12 @@ def test_bfactors_npy(case, mode, runner):
     )
 
 
-def test_residue_summary_matches_counts(case, mode, runner, glyco):
+def test_residue_summary_matches_counts(case, mode, runner):
     r = runner(case, mode)
     a = r.analysis
-    keys = unique_ca_keys(glyco, a)
+    keys = unique_ca_keys(a)
     k_last = _last_k(a)
-    tf_last = int(a._analyzed_frames()[k_last])
+    tf_last = int(_analyzed(a)[k_last])
     counts, sasa = _last_counts(a), np.asarray(a.results.sasa)[k_last]
 
     got = {}
@@ -253,7 +355,7 @@ def test_residue_summary_matches_counts(case, mode, runner, glyco):
 def test_excluded_atoms_consistent(case, mode, runner, glyco):
     r = runner(case, mode)
     a = r.analysis
-    keys = unique_ca_keys(glyco, a)
+    keys = unique_ca_keys(a)
     n_gly = len(a.gly_atoms)
     count_of = {(c, rid): int(n) for (c, rid, _), n in zip(keys, _last_counts(a))}
     serials = {str(s) for s in glyco.pdb_atom_ids(a.gly_atoms)}
@@ -328,7 +430,7 @@ def test_cli_matches_library(
     finally:
         logging.captureWarnings(False)
 
-    _assert_positive_radii(probe["calls"], "CLI")
+    _assert_positive_radii(probe["calls"], "CLI")  # pylint: disable=unsubscriptable-object
     for name in (*COMPARED_CSVS, "frame_summary.csv"):
         assert_same_file(r.outdir / name, cli_dir / name, f"CLI vs library: {name}")
     np.testing.assert_array_equal(
@@ -341,12 +443,10 @@ def test_bfactors_pdb_per_residue(case, mode, runner, glyco):
     r = runner(case, mode)
     a = r.analysis
     u = glyco.mda.Universe(str(r.outdir / "b_factors.pdb"))
-    expected = dict(
-        zip(
-            a.prot_atoms.resindices.tolist(),
-            a.all_counts[a._resolve_frame_index(a.bfactor_frame)].tolist(),
-        )
-    )
+
+    k = -1 if a.bfactor_frame is None else a.bfactor_frame
+    expected = dict(zip(a.prot_atoms.resindices.tolist(), a.all_counts[k].tolist()))
+
     for res in u.residues:
         values = set(res.atoms.tempfactors.round(2).tolist())
         assert len(values) == 1, f"{res}: several B-factors {sorted(values)}"
@@ -387,6 +487,28 @@ def test_get_blockers_rejects_box_test(case, mode, runner):
 # --------------------------------------------------------------------------
 
 
+def test_bad_trajectory_load_is_reported(
+    glyco, glyco_cli_args, first_case, tmp_path, capsys
+):
+    """A trajectory that cannot be read is a usage error, not a traceback."""
+    bad = tmp_path / "bad.xtc"
+    bad.write_bytes(b"not a trajectory")
+    argv = [
+        "-a",
+        first_case.top,
+        "-b",
+        str(bad),
+        *glyco_cli_args(first_case),
+        "-o",
+        str(tmp_path / "out"),
+        "--force",
+    ]
+    with pytest.raises(SystemExit) as exc:
+        glyco.main(argv)
+    assert exc.value.code == 2
+    assert "could not load" in capsys.readouterr().err
+
+
 @pytest.mark.glyco_kind("trajectory")
 def test_frame_slicing_consistent(case, mode, runner):
     full = runner(case, mode)
@@ -403,8 +525,6 @@ def test_frame_slicing_consistent(case, mode, runner):
 @pytest.mark.glyco_kind("trajectory")
 def test_trajectory_frame_equals_single_structure(case, mode, runner, glyco):
     """Frame k of the trajectory == the same coordinates as a 1-frame Universe."""
-    from MDAnalysis.coordinates.memory import MemoryReader
-
     full = runner(case, mode)
     k, frame = _last_analyzed(full)
     u = glyco.load_universe(case.top, list(case.traj))
@@ -433,19 +553,20 @@ def test_get_blockers_ignores_trajectory_position(case, mode, runner):
     r = runner(case, mode)
     a = r.analysis
     k_last, _ = _last_analyzed(r)  # skips with < 2 frames
-    other = int(a._analyzed_frames()[0])  # differs from the last frame
+    other = int(_analyzed(a)[0])  # differs from the last frame
     traj = a.u.trajectory
     old = int(traj.frame)
 
     expected = a.get_blockers(frame_index=-1)
     try:
-        traj[other]
+        traj[other]  # pylint: disable=pointless-statement
         cached = a.get_blockers()  # default options: cache path
         assert traj.frame == other, "get_blockers() moved the trajectory"
         explicit = a.get_blockers(start_idx=a.surface_start_indices(k_last))
         assert traj.frame == other, "get_blockers(start_idx=...) moved the trajectory"
     finally:
-        traj[old]  # runner results are shared
+        traj[old]  # pylint: disable=pointless-statement
+        # runner results are shared
 
     for label, (blockers, dists) in (
         ("cached path", cached),
@@ -466,7 +587,7 @@ def test_get_blockers_frame_index_matches_single_frame_run(case, mode, runner):
     """get_blockers(frame_index=0) of the full run == the same frame analyzed alone."""
     full = runner(case, mode)
     _last_analyzed(full)  # skips with < 2 frames
-    first = int(full.analysis._analyzed_frames()[0])
+    first = int(_analyzed(full.analysis)[0])
     single = runner(case, mode, frames=[first])
 
     got_b, got_d = full.analysis.get_blockers(frame_index=0)  # recomputed (not cached)

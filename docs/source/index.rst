@@ -29,6 +29,7 @@ Indices and tables
 
    installation
    quickstart
+   app
    modes
    outputs
 

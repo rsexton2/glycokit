@@ -26,6 +26,9 @@ from glycokit.parsers import compare_parser
 # Configuration
 # =====================================================================
 
+_COUNT_LINE_ERRORS = (ValueError, SyntaxError, TypeError)
+_COMPARE_ERRORS = (OSError, RuntimeError, ValueError, csv.Error)
+
 # column names: glycokit (snake_case) and GLYCO-2's final_df_*.csv
 GLYCOKIT_RESIDUE = {
     "chain": "chain",
@@ -62,7 +65,7 @@ def read_residue_csv(path, columns):
     or NaN SASA field (GLYCO-2 residues missing from its RSA data) becomes None.
     """
     values = {}
-    with open(path, newline="") as handle:
+    with open(path, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         if not set(columns.values()).issubset(reader.fieldnames or []):
             raise ValueError(
@@ -95,7 +98,7 @@ def read_excluded_csv(path, columns):
     """
     keys = set()
     n_rows = n_duplicates = 0
-    with open(path, newline="") as handle:
+    with open(path, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         if not set(columns.values()).issubset(reader.fieldnames or []):
             raise ValueError(
@@ -287,7 +290,7 @@ def normalize_pdb(src, dst):
     """
     stats = {"atoms": 0, "anisou": 0, "models": 0, "other": 0}
 
-    with open(src) as fin, open(dst, "w") as fout:
+    with open(src, encoding="utf-8") as fin, open(dst, "w", encoding="utf-8") as fout:
         for line in fin:
             record = line[:6]
             if not line.endswith("\n"):
@@ -311,7 +314,7 @@ def normalize_pdb(src, dst):
         fout.write("END\n")
 
     # Count the MODEL records of the whole file (the loop stops early).
-    with open(src) as fin:
+    with open(src, encoding="utf-8") as fin:
         stats["models"] = sum(1 for line in fin if line.startswith("MODEL"))
 
     return stats
@@ -449,7 +452,7 @@ def read_v1_count_file(path):
     """
     values = {}
 
-    with open(path) as handle:
+    with open(path, encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             line = line.strip()
             if not line:
@@ -459,7 +462,7 @@ def read_v1_count_file(path):
                 tuple_text, count_text = line.rsplit(maxsplit=1)
                 residue = ast.literal_eval(tuple_text)
                 count = float(count_text)
-            except Exception as exc:
+            except _COUNT_LINE_ERRORS as exc:
                 raise ValueError(
                     f"Could not parse {path}:{line_number}: {line!r}"
                 ) from exc
@@ -484,7 +487,7 @@ def read_v1_rsa(path):
     """Read GLYCO v1's *_all_outer.rsa with glyco_mod.py's column layout."""
     values = {}
 
-    with open(path) as handle:
+    with open(path, encoding="utf-8") as handle:
         for line in handle:
             if line[0:3] != "RES":
                 continue
@@ -911,6 +914,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Exception as exc:  # noqa: BLE001
+    except _COMPARE_ERRORS as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(2)

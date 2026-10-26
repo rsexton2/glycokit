@@ -178,7 +178,7 @@ def test_base_parser_defaults_unchanged():
     assert d["area_cutoff"] == 30.0
     assert d["sasa_probe"] == 1.4
     assert d["n_workers"] == 1
-    assert type(d["n_workers"]) is int
+    assert isinstance(d["n_workers"], int)
 
 
 def test_base_parser_option_types():
@@ -192,6 +192,7 @@ def test_base_parser_option_types():
         "vdw_probe": non_negative_float,
         "n_workers": n_workers_int,
     }
+    # pylint: disable=protected-access
     types = {a.dest: a.type for a in base_parser()._actions}
     for dest, func in expected.items():
         assert types[dest] is func, f"{dest}: type is {types[dest]!r}"

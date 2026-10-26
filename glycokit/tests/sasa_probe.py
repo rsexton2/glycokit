@@ -1,4 +1,4 @@
-"""capture.py -- record every FreeSASA call (plus subprocess / process-pool
+"""sasa_probe.py -- record every FreeSASA call (plus subprocess / process-pool
 launches) made inside a ``with capture(path):`` block.
 
 Output JSON: {"version": 2, "pid": int, "calls": [...], "events": [...]}
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import functools
 import json
 import multiprocessing
 import os
@@ -19,13 +20,15 @@ import sys
 import traceback
 
 import freesasa
+import numpy as np
 
 _THIS_FILE = os.path.abspath(__file__)
 
 # Originals are stored ONCE, on the freesasa module itself, so that importing
 # this file twice under different names can never store an already-wrapped object.
-if not hasattr(freesasa, "_probe_originals"):
-    freesasa._probe_originals = {
+_ORIG = getattr(freesasa, "_probe_originals", None)
+if _ORIG is None:
+    _ORIG = {
         "freesasa.calc": freesasa.calc,
         "freesasa.calcCoord": getattr(freesasa, "calcCoord", None),
         "freesasa.calcBioPDB": getattr(freesasa, "calcBioPDB", None),
@@ -35,25 +38,41 @@ if not hasattr(freesasa, "_probe_originals"):
         "multiprocessing.Pool": multiprocessing.Pool,
         "concurrent.futures.ProcessPoolExecutor": concurrent.futures.ProcessPoolExecutor,
     }
-_ORIG = freesasa._probe_originals
-_state: dict | None = None  # {"calls": [...], "events": [...]} while capturing
-_REF_CLASSIFIER = None
+
+    freesasa._probe_originals = _ORIG  # pylint: disable=protected-access
+
+# {"calls": [...], "events": [...]} while a capture() block is active
+_RUN: dict = {"state": None}
+
+# Errors from inspecting arbitrary entries of sys.modules (lazy modules,
+# extension modules without __dict__, non-string __file__)
+_MODULE_SCAN_ERRORS = (AttributeError, TypeError, ValueError, ImportError)
 
 # -------------------------------------- helpers -------------------------------
 
 
+def _freesasa_call(fn, *args):
+    """
+    Call a freesasa function and return ``(value, None)`` or ``(None, exc)``.
+
+    freesasa's Cython bindings raise plain ``Exception``, so nothing
+    narrower can be caught here. Used only for optional, diagnostic values.
+    """
+    try:
+        return fn(*args), None
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # noqa: BLE001
+        return None, exc
+
+
+@functools.lru_cache(maxsize=1)
 def _reference_classifier():
-    global _REF_CLASSIFIER
-    if _REF_CLASSIFIER is None:
-        try:
-            _REF_CLASSIFIER = freesasa.Classifier()
-        except Exception:
-            _REF_CLASSIFIER = False
-    return _REF_CLASSIFIER or None
+    """Default FreeSASA classifier (ProtOr), or None if it cannot be built."""
+    classifier, _ = _freesasa_call(freesasa.Classifier)
+    return classifier
 
 
 def _caller(depth: int = 4) -> list[str]:
-    """Innermost frames outside this file, e.g. 'mdafreesasa.py:182 in _compute_freesasa_result'."""
+    """Innermost frames outside this file, e.g. 'mdafreesasa.py:182 in _compute'."""
     out = []
     for fr in reversed(traceback.extract_stack()):
         if os.path.abspath(fr.filename) == _THIS_FILE:
@@ -65,8 +84,9 @@ def _caller(depth: int = 4) -> list[str]:
 
 
 def _event(kind: str, arg0) -> None:
-    if _state is not None:
-        _state["events"].append(
+    state = _RUN["state"]
+    if state is not None:
+        state["events"].append(
             {"event": kind, "arg0": repr(arg0)[:300], "caller": _caller()}
         )
 
@@ -78,41 +98,32 @@ def _params(p) -> dict:
     for name in ("probeRadius", "algorithm", "nPoints", "nSlices", "nThreads"):
         fn = getattr(p, name, None)
         if callable(fn):
-            try:
-                out[name] = fn()
-            except Exception as exc:  # some getters only apply to one algorithm
-                out[name] = f"<{exc}>"
+            # some getters only apply to one algorithm
+            value, exc = _freesasa_call(fn)
+            out[name] = value if exc is None else f"<{exc}>"
     return out
 
 
-def _reference_classifier():
-    try:
-        return freesasa.Classifier()  # default classifier (ProtOr)
-    except Exception:
-        return None
-
-
-def _structure_atoms(s) -> list[dict]:
+def _structure_atoms(structure) -> list[dict]:
     ref = _reference_classifier()
     atoms = []
-    for i in range(s.nAtoms()):
-        resname = s.residueName(i).strip()
-        name = s.atomName(i).strip()
+    for i in range(structure.nAtoms()):
+        resname = structure.residueName(i).strip()
+        name = structure.atomName(i).strip()
         ref_r = None
         if ref is not None:
-            try:
-                ref_r = round(ref.radius(resname, name), 4)
-            except Exception:
-                pass
-        x, y, z = s.coord(i)
+            radius, _ = _freesasa_call(ref.radius, resname, name)
+            if radius is not None:
+                ref_r = round(radius, 4)
+        x, y, z = structure.coord(i)
         atoms.append(
             {
                 "i": i,
-                "chain": s.chainLabel(i).strip(),
-                "resnum": s.residueNumber(i).strip(),
+                "chain": structure.chainLabel(i).strip(),
+                "resnum": structure.residueNumber(i).strip(),
                 "resname": resname,
                 "name": name,
-                "radius": round(s.radius(i), 4),
+                "radius": round(structure.radius(i), 4),
                 "protor_radius": ref_r,
                 "xyz": [round(x, 3), round(y, 3), round(z, 3)],
             }
@@ -122,24 +133,18 @@ def _structure_atoms(s) -> list[dict]:
 
 def _flat(seq) -> list[float]:
     try:
-        import numpy as np
-
         return [float(v) for v in np.asarray(seq, dtype=float).ravel()]
-    except Exception:
+    except (TypeError, ValueError):  # ragged or non-numeric input
         return [float(v) for v in seq]
 
 
 # -------------------------------------------------------------------- wrappers
-# def _calc(structure, *args, **kwargs):
-#     if _state is not None:
-#         params = args[0] if args else kwargs.get("parameters")
-#         _state["calls"].append({
-#             "call": "calc", "caller": _caller(), "params": _params(params),
-#             "n_atoms": structure.nAtoms(), "atoms": _structure_atoms(structure)})
-#     return _ORIG["freesasa.calc"](structure, *args, **kwargs)
+
+
 def _calc(structure, *args, **kwargs):
     result = _ORIG["freesasa.calc"](structure, *args, **kwargs)
-    if _state is not None:
+    state = _RUN["state"]
+    if state is not None:
         params = args[0] if args else kwargs.get("parameters")
         rec = {
             "call": "calc",
@@ -149,44 +154,52 @@ def _calc(structure, *args, **kwargs):
             "atoms": _structure_atoms(structure),
         }
         areas = [result.atomArea(i) for i in range(structure.nAtoms())]
-        for a, area in zip(rec["atoms"], areas):
-            a["area"] = round(area, 4)
+        for atom, area in zip(rec["atoms"], areas):
+            atom["area"] = round(area, 4)
         rec["total"] = round(result.totalArea(), 4)
-        _state["calls"].append(rec)
+        state["calls"].append(rec)
     return result
 
 
+def _orig_callable(key: str):
+    orig = _ORIG.get(key)
+    if orig is None or not callable(orig):
+        raise AttributeError(f"{key} is unavailable in this FreeSASA build")
+    return orig
+
+
 def _calc_coord(coord, radii, *args, **kwargs):
-    if _state is not None:
-        c, r = _flat(coord), _flat(radii)
+    state = _RUN["state"]
+    if state is not None:
+        xyz, radius_list = _flat(coord), _flat(radii)
         params = args[0] if args else kwargs.get("parameters")
-        _state["calls"].append(
+        state["calls"].append(
             {
                 "call": "calcCoord",
                 "caller": _caller(),
                 "params": _params(params),
-                "n_atoms": len(r),
+                "n_atoms": len(radius_list),
                 "atoms": [
                     {
                         "i": i,
                         "radius": round(ri, 4),
-                        "xyz": [round(v, 3) for v in c[3 * i : 3 * i + 3]],
+                        "xyz": [round(v, 3) for v in xyz[3 * i : 3 * i + 3]],
                     }
-                    for i, ri in enumerate(r)
+                    for i, ri in enumerate(radius_list)
                 ],
             }
         )
-    return _ORIG["freesasa.calcCoord"](coord, radii, *args, **kwargs)
+    return _orig_callable("freesasa.calcCoord")(coord, radii, *args, **kwargs)
 
 
 def _logged(key: str):
-    orig = _ORIG[key]
+    orig = _orig_callable(key)
 
+    @functools.wraps(orig)  # also sets __wrapped__
     def wrapper(*args, **kwargs):
         _event(key, args[0] if args else kwargs)
         return orig(*args, **kwargs)
 
-    wrapper.__wrapped__ = orig
     return wrapper
 
 
@@ -203,18 +216,15 @@ class _LoggedProcessPool(_ORIG["concurrent.futures.ProcessPoolExecutor"]):
 
 
 def _swaps() -> dict[int, tuple[str, object]]:
+    def logged_if_present(key):
+        return _logged(key) if _ORIG[key] else None
+
     repl = {
         "freesasa.calc": _calc,
         "freesasa.calcCoord": _calc_coord,
-        "freesasa.calcBioPDB": _logged("freesasa.calcBioPDB")
-        if _ORIG["freesasa.calcBioPDB"]
-        else None,
-        "freesasa.structureArray": _logged("freesasa.structureArray")
-        if _ORIG["freesasa.structureArray"]
-        else None,
-        "freesasa.classifyResults": _logged("freesasa.classifyResults")
-        if _ORIG["freesasa.classifyResults"]
-        else None,
+        "freesasa.calcBioPDB": logged_if_present("freesasa.calcBioPDB"),
+        "freesasa.structureArray": logged_if_present("freesasa.structureArray"),
+        "freesasa.classifyResults": logged_if_present("freesasa.classifyResults"),
         "subprocess.Popen": _LoggedPopen,
         "multiprocessing.Pool": _logged("multiprocessing.Pool"),
         "concurrent.futures.ProcessPoolExecutor": _LoggedProcessPool,
@@ -235,14 +245,14 @@ def _patch_everywhere(swaps) -> list[tuple[dict, str, object]]:
         try:
             if os.path.abspath(getattr(mod, "__file__", "") or "") == _THIS_FILE:
                 continue  # never patch the probe itself
-            d = vars(mod)
-        except Exception:
+            namespace = vars(mod)
+        except _MODULE_SCAN_ERRORS:
             continue
-        for attr, val in list(d.items()):
+        for attr, val in list(namespace.items()):
             hit = swaps.get(id(val))
             if hit is not None and val is _ORIG[hit[0]]:
-                d[attr] = hit[1]
-                undo.append((d, attr, val))
+                namespace[attr] = hit[1]
+                undo.append((namespace, attr, val))
     return undo
 
 
@@ -253,47 +263,58 @@ def capture(path, *, require_calls: bool = False):
 
     require_calls=True raises if no calc/calcCoord call was seen (e.g. a cached
     result, or SASA computed in another process -- check "events").
+
+    :return: The live record, a dict with ``"calls"`` and ``"events"`` lists.
     """
-    global _state
-    if _state is not None:
+    if _RUN["state"] is not None:
         raise RuntimeError("capture() blocks cannot be nested")
-    _state = {"calls": [], "events": []}
+    state = {"calls": [], "events": []}
+    _RUN["state"] = state
     undo = _patch_everywhere(_swaps())
     completed = False
     try:
-        yield _state
+        yield state
         completed = True
     finally:
-        for d, attr, val in reversed(undo):
-            d[attr] = val
-        data = {"version": 2, "pid": os.getpid(), **_state}
-        _state = None
-        with open(path, "w") as fh:
+        for namespace, attr, val in reversed(undo):
+            namespace[attr] = val
+        _RUN["state"] = None
+        data = {"version": 2, "pid": os.getpid(), **state}
+        with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=1, default=str)
-        print(
-            f"{path}: {len(data['calls'])} FreeSASA call(s) "
-            f"{[(c['call'], c['n_atoms'], c['caller'][0] if c['caller'] else '?') for c in data['calls']]}; "
-            f"events: {[e['event'] for e in data['events']]}"
-        )
+        calls = [
+            (c["call"], c["n_atoms"], c["caller"][0] if c["caller"] else "?")
+            for c in data["calls"]
+        ]
+        events = [e["event"] for e in data["events"]]
+        print(f"{path}: {len(calls)} FreeSASA call(s) {calls}; events: {events}")
         assert freesasa.calc is _ORIG["freesasa.calc"], "freesasa.calc was not restored"
     if completed and require_calls and not data["calls"]:
         raise AssertionError(
             f"{path}: no FreeSASA calls captured (cached result, worker process, "
-            f"or subprocess? events={[e['event'] for e in data['events']]})"
+            f"or subprocess? events={events})"
         )
 
 
 def load_calls(path) -> list[dict]:
     """Read a probe file; accepts both the old list format and the v2 dict format."""
-    with open(path) as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
     return data["calls"] if isinstance(data, dict) else data
 
 
-if __name__ == "__main__":
-    # Self-test: python capture.py structure.pdb
-    pdb = sys.argv[1]
+def _selftest(pdb):
+    """Run FreeSASA on ``pdb`` inside capture() and check the patching."""
     with capture("probe_selftest.json", require_calls=True):
-        s = freesasa.Structure(pdb)
-        r = freesasa.calc(s)
-    print("total SASA:", round(r.totalArea(), 3), "(no recursion, originals restored)")
+        structure = freesasa.Structure(pdb)
+        result = freesasa.calc(structure)
+    print(
+        "total SASA:",
+        round(result.totalArea(), 3),
+        "(no recursion, originals restored)",
+    )
+
+
+if __name__ == "__main__":
+    # Self-test: python sasa_probe.py structure.pdb
+    _selftest(sys.argv[1])

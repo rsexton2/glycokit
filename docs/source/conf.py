@@ -18,12 +18,13 @@ from importlib import metadata
 
 sys.path.insert(0, os.path.abspath("../../"))
 sys.path.insert(0, os.path.abspath("../source"))
-import glycokit  # noqa
-
 
 # -- Project information -----------------------------------------------------
 
 project = "GlyCoKit"
+
+# Sphinx expects this setting; pylint otherwise flags its built-in name.
+# pylint: disable=redefined-builtin
 copyright = (
     "2026, Ricky Sexton. "
     "Project structure based on the "
