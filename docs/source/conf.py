@@ -112,22 +112,36 @@ pygments_style = "default"
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = "mdanalysis_sphinx_theme"
+# html_theme = "mdanalysis_sphinx_theme"
+html_theme = "furo"
 html_title = "GlyCo (glycokit)"
+# Code highlighting for each mode
+pygments_style = "sphinx"
+pygments_dark_style = "monokai"
+
+html_theme_options = {
+    # Optional: separate logos for light and dark backgrounds (in _static/)
+    # "light_logo": "glycokit-light.png",
+    # "dark_logo": "glycokit-dark.png",
+    # Optional: brand colors per mode
+    "light_css_variables": {"color-brand-primary": "#2c7bb6"},
+    "dark_css_variables": {"color-brand-primary": "#7fb8e0"},
+}
 
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
 # documentation.
 #
-html_theme_options = {
-    "mda_official": False,
-}
+# html_theme_options = {
+#     "mda_official": False,
+#     "default_mode": "dark",
+# }
 
 # Set your logo and favicon here -- replace the placeholders!
 # An SVG with empty gears is provided for editing
-html_logo = "_static/logo/glyco-logo.svg"
-html_favicon = "_static/logo/glyco-logo.svg"
+html_logo = "_static/logo/glyco-logo-v2.svg"
+html_favicon = "_static/logo/glyco-logo-v2.svg"
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,

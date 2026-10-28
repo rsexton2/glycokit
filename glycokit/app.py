@@ -47,14 +47,24 @@ fragment = getattr(st, "fragment", lambda func: func)
 # =====================================================================
 # Configuration
 # =====================================================================
+
 # Run outputs: one subdirectory per run below this directory. Relative paths
 # are resolved against the directory `streamlit run` was started from.
 RESULTS_ROOT = os.environ.get("GLYCO_APP_RESULTS", "glyco_results")
 
 # --- scroll / zoom ---------------------------------------------------------
-INVERT_SCROLL_ZOOM = False  # reverse the mouse-wheel zoom in both viewers
-SCROLL_DOWN_ZOOMS_IN = True  # py3Dmol: flip this if the direction is still wrong
+INVERT_SCROLL_ZOOM = True  # reverse the mouse-wheel zoom in both viewers
+SCROLL_DOWN_ZOOMS_IN = False  # py3Dmol: flip this if the direction is still wrong
 ZOOM_PER_PIXEL = 1.002  # py3Dmol: zoom factor per pixel of wheel movement
+
+# --- centering / camera ----------------------------------------------------
+CENTER_ON_LOAD = True  # center both viewers when a structure is first shown
+KEEP_RESULT_VIEW = (
+    True  # py3Dmol: keep zoom/rotation when style, colors or range change
+)
+# Mol*: times (ms after the frame appears) at which the camera is reset.
+# Increase the last value if very large trajectories take longer to load.
+MOLSTAR_RECENTER_DELAYS_MS = (300, 1000, 2000, 4000)
 
 # Errors from the glycan guesser on unusual inputs
 GUESS_ERRORS = (ValueError, IndexError, KeyError)
@@ -70,14 +80,77 @@ GLYCO_COMMAND = [sys.executable, "-m", "glycokit.glyco"]
 PARSER = base_parser()
 
 # Linear color scales: evenly spaced color stops from t = 0 to t = 1
+# (any number of stops works; "Reverse" in the viewer flips the order)
 COLOR_SCALES = {
+    # --- simple two/three-color scales -------------------------------------
     "White → Red": ("#ffffff", "#d7191c"),
     "White → Blue": ("#ffffff", "#2c7bb6"),
     "White → Green": ("#ffffff", "#1a9641"),
     "White → Purple": ("#ffffff", "#7b3294"),
     "Grey → Red": ("#d9d9d9", "#d7191c"),
     "Blue → White → Red": ("#2c7bb6", "#ffffff", "#d7191c"),
-}
+    # --- perceptually uniform, colorblind-friendly (matplotlib) -------------
+    "Viridis": (
+        "#440154", "#472d7b", "#3b528b", "#2c728e", "#21918c",
+        "#28ae80", "#5ec962", "#addc30", "#fde725",
+    ),
+    "Magma": (
+        "#000004", "#1c1044", "#4f127b", "#812581", "#b5367a",
+        "#e55964", "#fb8761", "#fec287", "#fcfdbf",
+    ),
+    "Plasma": (
+        "#0d0887", "#4c02a1", "#7e03a8", "#a92395", "#cc4778",
+        "#e56b5d", "#f89441", "#fdc328", "#f0f921",
+    ),
+    "Inferno": (
+        "#000004", "#1f0c48", "#550f6d", "#88226a", "#ba3655",
+        "#e35933", "#f98e09", "#f9cb35", "#fcffa4",
+    ),
+    "Cividis": ("#00204d", "#414d6b", "#7c7b78", "#bcaf6f", "#ffea46"),
+    # --- ColorBrewer sequential (light -> dark) -----------------------------
+    "Blues": (
+        "#f7fbff", "#deebf7", "#c6dbef", "#9ecae1", "#6baed6",
+        "#4292c6", "#2171b5", "#08519c", "#08306b",
+    ),
+    "Reds": (
+        "#fff5f0", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a",
+        "#ef3b2c", "#cb181d", "#a50f15", "#67000d",
+    ),
+    "Greens": (
+        "#f7fcf5", "#e5f5e0", "#c7e9c0", "#a1d99b", "#74c476",
+        "#41ab5d", "#238b45", "#006d2c", "#00441b",
+    ),
+    "Purples": (
+        "#fcfbfd", "#efedf5", "#dadaeb", "#bcbddc", "#9e9ac8",
+        "#807dba", "#6a51a3", "#54278f", "#3f007d",
+    ),
+    "Oranges": (
+        "#fff5eb", "#fee6ce", "#fdd0a2", "#fdae6b", "#fd8d3c",
+        "#f16913", "#d94801", "#a63603", "#7f2704",
+    ),
+    "YlOrRd": (
+        "#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c",
+        "#fc4e2a", "#e31a1c", "#bd0026", "#800026",
+    ),
+    "YlGnBu": (
+        "#ffffd9", "#edf8b1", "#c7e9b4", "#7fcdbb", "#41b6c4",
+        "#1d91c0", "#225ea8", "#253494", "#081d58",
+    ),
+    # --- diverging (low -> mid -> high) -------------------------------------
+    "RdBu (blue → red)": (
+        "#053061", "#2166ac", "#4393c3", "#92c5de", "#d1e5f0", "#f7f7f7",
+        "#fddbc7", "#f4a582", "#d6604d", "#b2182b", "#67001f",
+    ),
+    "PuOr": (
+        "#7f3b08", "#b35806", "#e08214", "#fdb863", "#fee0b6", "#f7f7f7",
+        "#d8daeb", "#b2abd2", "#8073ac", "#542788", "#2d004b",
+    ),
+    "BrBG": (
+        "#543005", "#8c510a", "#bf812d", "#dfc27d", "#f6e8c3", "#f5f5f5",
+        "#c7eae5", "#80cdc1", "#35978f", "#01665e", "#003c30",
+    ),
+    "Coolwarm": ("#3b4cc0", "#8db0fe", "#dddddd", "#f49a7b", "#b40426"),
+}  # fmt: skip
 
 # Parser destinations set by the sidebar, the frame tab or the app itself;
 # they are not shown as parameter widgets.
@@ -124,7 +197,7 @@ VIEW_INPUT = "input"
 
 # --- result viewer (py3Dmol) --------------------------------------------
 RESULT_PREFIX = "result:"
-RESULT_WIDTH = 900  # pixels; py3Dmol needs a fixed width
+RESULT_WIDTH = 900  # pixels; py3Dmol needs a fixed width (overridden to 100% in JS)
 RESULT_HEIGHT = 600
 RESULT_STYLES = ("Cartoon", "Surface", "Sticks")
 GRADIENTS = ("roygb", "rwb", "sinebow")
@@ -167,7 +240,6 @@ RESULT_STRUCTURES = {
 PREFERRED_TABLES = ("residue_summary.csv", "residue_statistics.csv")
 MAX_TABLE_ROWS = 5000
 
-
 # Re-dispatches every trusted wheel event in the Mol* frame with a negated
 # delta. The re-dispatched event is untrusted, so it passes through unchanged.
 MOLSTAR_INVERT_ZOOM_HTML = """
@@ -205,9 +277,42 @@ MOLSTAR_INVERT_ZOOM_HTML = """
 </script>
 """
 
+# Fires a resize and presses Mol*'s own "Reset Zoom/Camera" button a few times
+# while a new Mol* frame loads, so the structure ends up centered.
+# The "%s" placeholder receives the delay list (JSON) in _molstar_helpers().
+MOLSTAR_RECENTER_HTML = """
+<script>
+(function () {
+  var DELAYS = %s;
+  function reset(w, d) {
+    try {
+      w.dispatchEvent(new w.Event("resize"));   // let Mol* pick up the frame size
+      var btn = d.querySelector(
+        "button[title='Reset Zoom'], button[title='Reset Camera']");
+      if (btn) btn.click();                     // Mol*'s own camera reset
+    } catch (e) {}
+  }
+  function attach() {
+    var frames;
+    try { frames = window.parent.document.querySelectorAll("iframe"); }
+    catch (e) { return; }
+    frames.forEach(function (f) {
+      var w, d;
+      try { w = f.contentWindow; d = f.contentDocument; } catch (e) { return; }
+      if (!w || !d || w.__glycoCentered) return;
+      if (!d.querySelector("[class*='msp-']")) return;  // not a Mol* frame (yet)
+      w.__glycoCentered = true;
+      DELAYS.forEach(function (ms) { setTimeout(function () { reset(w, d); }, ms); });
+    });
+  }
+  attach();
+  setInterval(attach, 500);  // Mol* frames are recreated when their key changes
+})();
+</script>
+"""
 
 # =====================================================================
-# Color Helpers
+# Color and viewer helpers
 # =====================================================================
 
 
@@ -276,6 +381,61 @@ def _invert_zoom_js(uniqueid):
     dy = Math.max(-200, Math.min(200, dy));
     viewer.zoom(Math.pow({ZOOM_PER_PIXEL}, {sign} * dy));  // > 1 zooms in
   }}, {{capture: true, passive: false}});
+}})();
+</script>"""
+
+
+def _view_js(uniqueid, storage_key):
+    """Fit the py3Dmol viewer to its frame and restore (or center) the camera.
+
+    The camera (``getView()``) is stored in the tab's sessionStorage under
+    ``storage_key``, so a rerun that rebuilds the viewer can restore it.
+    """
+    key = json.dumps(storage_key)
+    keep = "true" if KEEP_RESULT_VIEW else "false"
+    center = "true" if CENTER_ON_LOAD else "false"
+    return f"""
+<script>
+(function () {{
+  var KEY = {key}, KEEP = {keep}, CENTER = {center}, tries = 0;
+  function load() {{
+    if (!KEEP) return null;
+    try {{
+      var v = JSON.parse(window.sessionStorage.getItem(KEY));
+      return (Array.isArray(v) && v.length === 8) ? v : null;
+    }} catch (e) {{ return null; }}
+  }}
+  function save(viewer) {{
+    if (!KEEP) return;
+    try {{ window.sessionStorage.setItem(KEY, JSON.stringify(viewer.getView())); }}
+    catch (e) {{}}                       // storage blocked: just don't keep the view
+  }}
+  function setup() {{
+    var div = document.getElementById("3dmolviewer_{uniqueid}");
+    var viewer = window["viewer_{uniqueid}"];
+    if (!div || !viewer) {{                // 3Dmol.js is loaded asynchronously
+      if (tries++ < 100) setTimeout(setup, 100);
+      return;
+    }}
+    div.style.width = "100%";            // fill the column instead of a fixed width
+    viewer.resize();
+    var saved = load();
+    if (saved) viewer.setView(saved);    // user's zoom / rotation from before the rerun
+    else if (CENTER) viewer.zoomTo();    // first view of this structure: center it
+    viewer.render();
+    save(viewer);
+
+    if (viewer.setViewChangeCallback) {{
+      viewer.setViewChangeCallback(function () {{ save(viewer); }});
+    }}
+    setInterval(function () {{ save(viewer); }}, 500);   // fallback (e.g. custom wheel zoom)
+    window.addEventListener("pagehide", function () {{ save(viewer); }});
+    window.addEventListener("resize", function () {{    // keep the view, only refit canvas
+      viewer.resize();
+      viewer.render();
+    }});
+  }}
+  setup();
 }})();
 </script>"""
 
@@ -555,8 +715,8 @@ def run_analysis(command):
             log_file.flush()
             log_file.seek(0)
             output = log_file.read()
-            progress_bar.empty()
-            status_text.empty()
+        progress_bar.empty()
+        status_text.empty()
         return process.returncode, output
     finally:
         for path in (progress_file, log_path):
@@ -676,6 +836,7 @@ def _session_defaults():
         "run_id": 0,  # changes with every run (widget keys)
         "viewer_files": None,  # PDB + trajectory written for Mol*
         "viewer_files_id": 0,  # changes when they are rewritten (Mol* key)
+        "result_view_reset": 0,  # bumped by "Reset view" (py3Dmol camera key)
         "prot_sel": "protein",
         "gly_sel": "",
         "gly_sel_auto": None,  # last selection written by the guesser
@@ -731,7 +892,7 @@ def save_uploaded_file(uploaded_file):
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(uploaded_file.getvalue())
-    return tmp.name
+        return tmp.name
 
 
 def create_universe(topology_file, trajectory_files):
@@ -830,7 +991,7 @@ def apply_glycan_guess(overwrite=False):
     current = state.get("gly_sel", "").strip()
     if overwrite or not current or current == state.get("gly_sel_auto"):
         state["gly_sel"] = selection
-        state["gly_sel_auto"] = selection
+    state["gly_sel_auto"] = selection
 
 
 def _redetect_glycans():
@@ -939,10 +1100,15 @@ def _run_succeeded():
 # =====================================================================
 
 
-def _invert_molstar_zoom():
-    """Hidden helper that reverses the wheel zoom of every Mol* viewer."""
+def _molstar_helpers():
+    """Hidden helpers for every Mol* viewer: re-centering and inverted zoom."""
+    html = ""
+    if CENTER_ON_LOAD:
+        html += MOLSTAR_RECENTER_HTML % json.dumps(list(MOLSTAR_RECENTER_DELAYS_MS))
     if INVERT_SCROLL_ZOOM:
-        components.html(MOLSTAR_INVERT_ZOOM_HTML, height=0)
+        html += MOLSTAR_INVERT_ZOOM_HTML
+    if html:
+        components.html(html, height=0)
 
 
 def _default_stride(n_frames):
@@ -1055,17 +1221,22 @@ def _input_view(universe):
     st.caption(caption)
 
     key = f"molstar_input_{state.viewer_files_id}"  # stable while files are unchanged
-
     if files["traj"]:
         st_molstar(files["pdb"], files["traj"], height=MOLSTAR_HEIGHT, key=key)
     else:
         st_molstar(files["pdb"], height=MOLSTAR_HEIGHT, key=key)
-    _invert_molstar_zoom()
+    _molstar_helpers()
 
 
 # =====================================================================
 # Result viewer: py3Dmol colored by the B-factor column
 # =====================================================================
+
+
+def _reset_result_view():
+    """Button callback: forget the stored camera so the structure is re-centered."""
+    state = st.session_state
+    state["result_view_reset"] = state.get("result_view_reset", 0) + 1
 
 
 def _read_bfactors(pdb_text):
@@ -1080,7 +1251,7 @@ def _read_bfactors(pdb_text):
     return values
 
 
-def _py3dmol_html(pdb_text, style, cmap, vmin, vmax):
+def _py3dmol_html(pdb_text, style, cmap, vmin, vmax, storage_key):
     """HTML of a py3Dmol view: protein colored by ``cmap``, rest as grey sticks."""
     view = py3Dmol.view(width=RESULT_WIDTH, height=RESULT_HEIGHT)
     view.addModel(pdb_text, "pdb")
@@ -1098,9 +1269,8 @@ def _py3dmol_html(pdb_text, style, cmap, vmin, vmax):
     view.setHoverable({}, True, _hover_js(vmin, vmax), UNHOVER_JS)
     view.zoomTo()
 
-    view.setHoverable({}, True, _hover_js(vmin, vmax), UNHOVER_JS)
-    view.zoomTo()
     html = view._make_html()  # pylint: disable=protected-access  # as in stmol
+    html += _view_js(view.uniqueid, storage_key)
     if INVERT_SCROLL_ZOOM:
         html += _invert_zoom_js(view.uniqueid)
     return html
@@ -1124,21 +1294,31 @@ def _result_view(path):
         if st_molstar is not None:
             result_key = f"molstar_result_{state.get('run_id', 0)}"
             st_molstar(path, height=MOLSTAR_HEIGHT, key=result_key)
-            _invert_molstar_zoom()
+            _molstar_helpers()
         return
 
     values = _read_bfactors(pdb_text)
     lo, hi = (min(values), max(values)) if values else (0.0, 1.0)
 
-    col1, col2, col3 = st.columns([2, 2, 1])
+    # 1. view controls
+    col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
     with col1:
         style = st.radio("Style", RESULT_STYLES, horizontal=True, key="result_style")
     with col2:
         scale = st.selectbox("Color scale", list(COLOR_SCALES), key="result_scale")
     with col3:
         reverse = st.checkbox("Reverse", key="result_reverse")
+    with col4:
+        st.button(
+            "Reset view",
+            on_click=_reset_result_view,
+            key="result_reset_view",
+            help="Center the structure again (zoom and rotation are kept "
+            "otherwise when you change style, colors or range).",
+        )
     stops = COLOR_SCALES[scale][::-1] if reverse else COLOR_SCALES[scale]
 
+    # 2. value range mapped to 0 ... 1
     if hi > lo:
         start = 0.0 if lo >= 0 else float(lo)  # counts: 0 maps to t = 0
         vmin, vmax = st.slider(
@@ -1154,9 +1334,14 @@ def _result_view(path):
     else:
         vmin, vmax = lo, lo + 1.0  # constant values: avoid a zero-width range
 
+    # 3. viewer (camera kept per run / structure / reset counter)
+    storage_key = (
+        f"glyco_view:{state.get('run_id', 0)}:{path}:"
+        f"{state.get('result_view_reset', 0)}"
+    )
     cmap = _color_map(values, vmin, vmax, stops)
     components.html(
-        _py3dmol_html(pdb_text, style, cmap, vmin, vmax),
+        _py3dmol_html(pdb_text, style, cmap, vmin, vmax, storage_key),
         height=RESULT_HEIGHT + 20,
     )
     st.html(_colorbar_html(stops, vmin, vmax))
@@ -1223,7 +1408,6 @@ def _load_universe(topology_file, trajectory_files):
     validate_atom_selections()  # selections against the NEW Universe
     state["viewer_source"] = VIEW_INPUT  # viewer widgets not drawn yet
     state["viewer_subset"] = False  # must match the files prepared below
-
     # written once here; the viewer reuses them on every rerun
     try:
         with st.spinner("Preparing the 3D viewer..."):
@@ -1428,7 +1612,6 @@ def _execute_run(frames, cli_inputs):
         st.stop()
 
     command = build_command(frames, cli_inputs)
-
     # fresh output directory for every run, below RESULTS_ROOT
     clear_results()
     try:
@@ -1452,7 +1635,6 @@ def _execute_run(frames, cli_inputs):
         "seconds": time.perf_counter() - started,
     }
     state.results_zip = zip_directory(state.outdir) if returncode == 0 else None
-
     # point the viewer at the first result structure (drawn after this)
     results = _result_structures()
     if results:
@@ -1465,7 +1647,6 @@ def run_controls(frames, cli_inputs, cli_errors):
     selections_valid = _selections_ready()
     if not selections_valid:
         st.warning("Enter valid protein and glycan selections in the sidebar.")
-
     if frames is None:
         st.warning("Select a valid set of frames under 'Trajectory frames'.")
     if cli_errors:
