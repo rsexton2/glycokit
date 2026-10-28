@@ -6,8 +6,8 @@ def test_ccd_carbohydrates_without_biotite(monkeypatch):
     from glycokit import standardize  # pylint: disable=import-outside-toplevel
 
     monkeypatch.setitem(sys.modules, "biotite.structure.info", None)
-    standardize._ccd_carbohydrates.cache_clear()  # pylint: disable=protected-access
+    standardize.glycans._ccd_carbohydrates.cache_clear()  # pylint: disable=protected-access
     try:
-        assert standardize._ccd_carbohydrates() == frozenset()  # pylint: disable=protected-access
+        assert standardize.glycans._ccd_carbohydrates() == frozenset()  # pylint: disable=protected-access
     finally:
-        standardize._ccd_carbohydrates.cache_clear()  # pylint: disable=protected-access
+        standardize.glycans._ccd_carbohydrates.cache_clear()  # pylint: disable=protected-access

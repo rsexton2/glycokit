@@ -20,7 +20,7 @@ concurrency:
 
 defaults:
   run:
-    shell: bash  -l {0} 
+    shell: bash  -l {0}
 
 jobs:
   main-tests:
@@ -66,13 +66,13 @@ jobs:
       with:
         version: ${{ matrix.mdanalysis-version }}
         install-tests: false
-        installer:  mamba 
-        shell: bash  -l {0} 
-      
+        installer:  mamba
+        shell: bash  -l {0}
+
     - name: Install package
       run: |
         python --version
-        python -m pip install .  --no-deps 
+        python -m pip install .  --no-deps
 
     - name: Python information
       run: |
@@ -86,7 +86,7 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest -n 2 -v --cov=glycokit --cov-report=xml --color=yes glycokit/tests/
+        pytest -n 2 -v --cov=glycokit --cov-report=xml --color=yes  --junitxml=junit.xml -o junit_family=legacy glycokit/tests/
 
     - name: codecov
       if: github.repository == 'rsexton2/glycokit' && github.event_name != 'schedule'
@@ -104,6 +104,12 @@ jobs:
         # Forks can't access the CODECOV_TOKEN secret,
         # and a failed upload registers as an error
         fail_ci_if_error: true
+
+    - name: Upload test results to Codecov
+      if: ${{ !cancelled() }}
+      uses: codecov/test-results-action@v1
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
 
 
   pylint_check:

@@ -82,13 +82,6 @@ PARSER = base_parser()
 # Linear color scales: evenly spaced color stops from t = 0 to t = 1
 # (any number of stops works; "Reverse" in the viewer flips the order)
 COLOR_SCALES = {
-    # --- simple two/three-color scales -------------------------------------
-    "White → Red": ("#ffffff", "#d7191c"),
-    "White → Blue": ("#ffffff", "#2c7bb6"),
-    "White → Green": ("#ffffff", "#1a9641"),
-    "White → Purple": ("#ffffff", "#7b3294"),
-    "Grey → Red": ("#d9d9d9", "#d7191c"),
-    "Blue → White → Red": ("#2c7bb6", "#ffffff", "#d7191c"),
     # --- perceptually uniform, colorblind-friendly (matplotlib) -------------
     "Viridis": (
         "#440154", "#472d7b", "#3b528b", "#2c728e", "#21918c",

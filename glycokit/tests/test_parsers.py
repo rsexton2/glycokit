@@ -8,12 +8,14 @@ import math
 
 import pytest
 
-from glycokit.parsers import (
-    base_parser,
-    compare_parser,
+from glycokit._cli_common import (
     n_workers_int,
     non_negative_float,
     positive_float,
+)
+from glycokit.parsers import (
+    base_parser,
+    compare_parser,
     standardize_parser,
 )
 from glycokit.standardize import StandardizeOptions
