@@ -80,11 +80,13 @@ jobs:
 
     - name: Install package
       run: |
+        conda activate glycokit-test
         python --version
         python -m pip install .  --no-deps
 
     - name: Python information
       run: |
+        conda activate glycokit-test
         which python
         which pip
         pip list
@@ -95,6 +97,7 @@ jobs:
 
     - name: Run tests
       run: |
+        conda activate glycokit-test
         pytest --cov=. --junitxml=junit.xml -o junit_family=legacy --cov-report=xml:coverage.xml --cov-report=term
 
     - name: codecov
@@ -138,9 +141,10 @@ jobs:
 
     - name: Install Pylint
       run: |
+        conda activate glycokit-test
         which pip
         which python
-        pip install pylint mdanalysis
+        pip install pylint
 
     - name: Run Pylint
       env:
@@ -163,10 +167,12 @@ jobs:
 
     - name: Install dependencies
       run: |
+        conda activate glycokit-test
         pip install pipx twine
 
     - name: Build package
       run: |
+        conda activate glycokit-test
         python -m pipx run build --sdist
 
     - name: Check package build
