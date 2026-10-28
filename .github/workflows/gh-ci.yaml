@@ -86,13 +86,13 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest -n 2 -v --cov=glycokit --cov-report=xml --color=yes  --junitxml=junit.xml -o junit_family=legacy glycokit/tests/
+        pytest --cov --junitxml=junit.xml -o junit_family=legacy
 
     - name: codecov
       if: github.repository == 'rsexton2/glycokit' && github.event_name != 'schedule'
       uses: codecov/codecov-action@v5
       with:
-        file: coverage.xml
+        file: junit.xml
         name: codecov-${{ matrix.os }}-py${{ matrix.python-version }}
         verbose: True
         # to upload coverage reports, set a secret called CODECOV_TOKEN
