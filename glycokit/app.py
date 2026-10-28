@@ -1568,9 +1568,9 @@ def results_panel():
 
 def main():
     """Render the dashboard (Streamlit reruns this on every interaction)."""
-    st.set_page_config(page_title="GlyCo: Glycan Coverage", layout="wide")
+    st.set_page_config(page_title="GLYCO: Glycan Coverage", layout="wide")
     init_session_state()
-    st.title("GlyCo: Glycan Coverage")
+    st.title("GLYCO: Glycan Coverage")
 
     sidebar()
     universe = st.session_state.u
