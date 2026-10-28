@@ -381,6 +381,28 @@ def _warn_ignored_options(cfg, blocking):
             stacklevel=3,
         )
 
+    if getattr(cfg, "skip_sasa", False):
+        unused = [
+            flag
+            for name, flag in (
+                ("area_cutoff", "--ac"),
+                ("sasa_probe", "--pr"),
+                ("sasa_env", "--sasa-env"),
+                ("sasa_hetatm", "--sasa-hetatm"),
+            )
+            if changed(name)
+        ]
+        if unused:
+            warnings.warn(
+                f"{', '.join(unused)}: no effect with --skip-sasa", stacklevel=3
+            )
+        if cfg.mode != "default":
+            warnings.warn(
+                f"--skip-sasa with --mode {cfg.mode}: surface residues differ "
+                "from the legacy tools, so results will not match them",
+                stacklevel=3,
+            )
+
 
 def _validate_inputs(cfg, fail):
     """

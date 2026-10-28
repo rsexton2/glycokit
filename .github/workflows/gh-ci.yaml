@@ -107,10 +107,13 @@ jobs:
 
     - name: Upload test results to Codecov
       if: ${{ !cancelled() }}
-      uses: codecov/test-results-action@v1
+      uses: codecov/codecov-action@v5
       with:
+        file: junit.xml
+        name: codecov-tests-${{ matrix.os }}-py${{ matrix.python-version }}
+        verbose: True
         token: ${{ secrets.CODECOV_TOKEN }}
-
+        report-type: test_results
 
   pylint_check:
     if: "github.repository == 'rsexton2/glycokit'"

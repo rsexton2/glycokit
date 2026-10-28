@@ -258,6 +258,17 @@ def base_parser():
     )
     add_option(
         sasa,
+        ("--skip-sasa",),
+        "skip the FreeSASA pass: every residue of the protein selection is "
+        "treated as a surface residue (all heavy atoms are line-of-sight "
+        "starts). --ac, --pr, --sasa-env and --sasa-hetatm have no effect; "
+        "the sasa columns of the outputs are nan. --mode v1/v2 then no "
+        "longer reproduce the legacy tools",
+        dest="skip_sasa",
+        action="store_true",
+    )
+    add_option(
+        sasa,
         ("--sasa-hetatm",),
         "with --mode v1/v2: also include HETATM records in the legacy FreeSASA "
         "atom set (freesasa --hetatm). No effect with --sasa-env",

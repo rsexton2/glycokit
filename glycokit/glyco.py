@@ -130,38 +130,39 @@ class GlycoAnalysis(AnalysisBase):
 
     # Parameters set by _apply_params from base_parser() destinations.
     # Declared here for linters and readers; values come from the parser.
-    mode: str
+    area_cutoff: float
+    bfactor_frame: int | None
+    block_sel: str
     blocking: str | None
-    n_workers: int
-    top: str | None
-    traj: list[str] | None
+    color: str
+    cylinder_radius: float
+    distance_cutoff: float
+    force: bool
+    frame_list: list[int] | None
+    frame_start: int | None
+    frame_step: int | None
+    frame_stop: int | None
+    gly_sel: str
+    in_types: str
     indir: str | None
+    mode: str
+    n_workers: int
     outdir: str
     prot_sel: str
-    gly_sel: str
-    block_sel: str
     sasa_env: str | None
     sasa_hetatm: bool
     sasa_probe: float
-    area_cutoff: float
-    distance_cutoff: float
-    cylinder_radius: float
-    vdw_scale: float
+    skip_sasa: bool
+    top: str | None
+    traj: list[str] | None
     vdw_probe: float
-    frame_start: int | None
-    frame_stop: int | None
-    frame_step: int | None
-    frame_list: list[int] | None
-    bfactor_frame: int | None
-    write_excluded: bool
-    write_blockers: bool
-    write_vmd: bool
-    write_stats: bool
-    write_chimerax: bool
-    color: str
-    force: bool
-    in_types: str
+    vdw_scale: float
     verbose: bool
+    write_blockers: bool
+    write_chimerax: bool
+    write_excluded: bool
+    write_stats: bool
+    write_vmd: bool
 
     @classmethod
     def get_supported_backends(cls):
@@ -541,6 +542,60 @@ class GlycoAnalysis(AnalysisBase):
     # region FreeSASA setup
     # -------------------------------------------------------------
 
+    def _run_freesasa(self):
+        """
+        Run FreeSASA over the analyzed frames and map its areas to the
+        start residues.
+
+        :return: Areas, shape (n_frames, n_start_residues); start residues
+            missing from the SASA set get 0.
+        :rtype: numpy.ndarray
+        """
+        sasa_ag = self._sasa_atoms()
+        if len(sasa_ag) == 0:
+            self._error("FreeSASA atom set is empty")
+        sasa_res = np.unique(sasa_ag.resindices)
+
+        fsa = FreesasaAnalysis(sasa_ag, self.sasa_probe).run(
+            verbose=self._verbose,
+            progressbar_kwargs={"desc": "Running FreeSASA Analysis"},
+            **self._run_slice,
+        )
+        self._diag(
+            "[SASA diagnostic]",
+            f"mode={self._mode}",
+            f"universe_atoms={len(self.u.atoms)}",
+            f"sasa_atoms={len(sasa_ag)}",
+            f"sasa_residues={len(sasa_res)}",
+            f"start_residues={self._n_res_rows}",
+            f"structure_valid={fsa.structure_valid}",
+        )
+        self._check_sasa_structure(fsa)
+
+        areas = np.asarray(fsa.results.residue_areas, dtype=float)
+        if areas.shape != (self.n_frames, len(sasa_res)):
+            raise RuntimeError(
+                "Unexpected FreeSASA residue-area shape: got "
+                f"{areas.shape}, expected {(self.n_frames, len(sasa_res))}"
+            )
+
+        column_of = {int(r): i for i, r in enumerate(sasa_res)}
+        missing = [int(r) for r in self._residue_resindices if int(r) not in column_of]
+        self._check_sasa_coverage(missing)
+
+        residue_areas = np.zeros((self.n_frames, self._n_res_rows))
+        for row, resindex in enumerate(self._residue_resindices):
+            col = column_of.get(int(resindex))
+            if col is not None:
+                residue_areas[:, row] = areas[:, col]
+
+        self._diag(
+            "[SASA diagnostic]",
+            f"surface_residues={int(np.count_nonzero(residue_areas[0] >= self.area_cutoff))}",
+            f"area_cutoff={self.area_cutoff}",
+        )
+        return residue_areas
+
     def _sasa_atoms(self):
         """
         FreeSASA atom set.
@@ -644,49 +699,18 @@ class GlycoAnalysis(AnalysisBase):
         self._n_res_rows = len(self._residue_resindices)
 
         # ---------------- FreeSASA ----------------
-        sasa_ag = self._sasa_atoms()
-        if len(sasa_ag) == 0:
-            self._error("FreeSASA atom set is empty")
-        sasa_res = np.unique(sasa_ag.resindices)
-
-        fsa = FreesasaAnalysis(sasa_ag, self.sasa_probe).run(
-            verbose=self._verbose,
-            progressbar_kwargs={"desc": "Running FreeSASA Analysis"},
-            **self._run_slice,
-        )
-        self._diag(
-            "[SASA diagnostic]",
-            f"mode={self._mode}",
-            f"universe_atoms={len(self.u.atoms)}",
-            f"sasa_atoms={len(sasa_ag)}",
-            f"sasa_residues={len(sasa_res)}",
-            f"start_residues={self._n_res_rows}",
-            f"structure_valid={fsa.structure_valid}",
-        )
-        self._check_sasa_structure(fsa)
-
-        areas = np.asarray(fsa.results.residue_areas, dtype=float)
-        if areas.shape != (self.n_frames, len(sasa_res)):
-            raise RuntimeError(
-                "Unexpected FreeSASA residue-area shape: got "
-                f"{areas.shape}, expected {(self.n_frames, len(sasa_res))}"
+        # ---------------- FreeSASA ----------------
+        if self.skip_sasa:
+            # no SASA: every start residue is a surface residue (see
+            # surface_residue_rows); NaN marks the areas as not computed
+            self.residue_areas = np.full((self.n_frames, self._n_res_rows), np.nan)
+            self._diag(
+                "[SASA diagnostic]",
+                "skipped (--skip-sasa)",
+                f"surface_residues={self._n_res_rows} (all start residues)",
             )
-
-        column_of = {int(r): i for i, r in enumerate(sasa_res)}
-        missing = [int(r) for r in self._residue_resindices if int(r) not in column_of]
-        self._check_sasa_coverage(missing)
-
-        self.residue_areas = np.zeros((self.n_frames, self._n_res_rows))
-        for row, resindex in enumerate(self._residue_resindices):
-            col = column_of.get(int(resindex))
-            if col is not None:
-                self.residue_areas[:, row] = areas[:, col]
-
-        self._diag(
-            "[SASA diagnostic]",
-            f"surface_residues={int(np.count_nonzero(self.residue_areas[0] >= self.area_cutoff))}",
-            f"area_cutoff={self.area_cutoff}",
-        )
+        else:
+            self.residue_areas = self._run_freesasa()
 
         # ---------------- residue bookkeeping ----------------
         self._blocker_resindex = np.asarray(self.blocker_atoms.resindices)
@@ -849,9 +873,8 @@ class GlycoAnalysis(AnalysisBase):
 
     def surface_residue_rows(self, frame_index=None):
         """
-        Residue rows that are surface residues (SASA >= area_cutoff).
-
-        Only SASA is read; the trajectory position does not matter.
+        Residue rows that are surface residues (SASA >= area_cutoff; every
+        row with ``skip_sasa``).
 
         :param frame_index: Analyzed-frame index. None means the frame being
             analyzed during :meth:`run`, and the last analyzed frame afterwards.
@@ -859,7 +882,10 @@ class GlycoAnalysis(AnalysisBase):
         :rtype: numpy.ndarray of int
         :raises RuntimeError: Before :meth:`run`.
         """
+
         self._require_run()
+        if self.skip_sasa:
+            return np.arange(self._n_res_rows)
         if frame_index is None:
             frame_index = self._frame_index
         return np.flatnonzero(self.residue_areas[frame_index] >= self.area_cutoff)
