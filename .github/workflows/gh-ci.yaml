@@ -60,14 +60,23 @@ jobs:
         auto-activate-base: false
         show-channel-urls: true
 
+    # - name: Install MDAnalysis version
+      # uses: MDAnalysis/install-mdanalysis@main
+      # with:
+        # version: ${{ matrix.mdanalysis-version }}
+        # install-tests: false
+        # installer:  mamba
+        # shell: bash  -l {0}
 
-    - name: Install MDAnalysis version
-      uses: MDAnalysis/install-mdanalysis@main
-      with:
-        version: ${{ matrix.mdanalysis-version }}
-        install-tests: false
-        installer:  mamba
-        shell: bash  -l {0}
+    - name: Install MDAnalysis in active env
+      shell: bash -l {0}
+      run: |
+        conda activate glycokit-test
+        if [ "${{ matrix.mdanalysis-version }}" = "develop" ]; then
+          python -m pip install --no-deps git+https://github.com/MDAnalysis/mdanalysis.git@develop
+        else
+          mamba install -y -n glycokit-test mdanalysis
+        fi
 
     - name: Install package
       run: |

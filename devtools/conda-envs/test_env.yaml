@@ -9,7 +9,7 @@ dependencies:
   - pip
 
   # MDAnalysis
-  - mdanalysis
+#  - mdanalysis
 
   # Testing
   - pytest
