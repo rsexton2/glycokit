@@ -42,7 +42,6 @@ from scipy.stats import t as t_res
 
 from glycokit.config import (
     _BLOCKING_TESTS,
-    _BOX_STATE,
     _JOB_ERRORS,
     _KD_PAD,
     _LOAD_ERRORS,
@@ -62,6 +61,7 @@ from glycokit.console import (
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import base_parser
 from glycokit.utils import (
+    _BOX_STATE,
     _box_chunk,
     _build_x_buckets,
     _cylinder_blocked,
@@ -77,6 +77,7 @@ from glycokit.utils import (
     heavy_atoms,
     load_universe,
     pdb_atom_ids,
+    resolve_glycan_selection,
     validate_arguments,
 )
 from glycokit.warnlog import warning_log
@@ -208,8 +209,11 @@ class GlycoAnalysis(AnalysisBase):
         self._param_names = sorted(defaults)
         self._from_cli = _args is not None
         self._apply_params(defaults, _args, kwargs)
+        self.verbose = verbose
 
         self._validate_args()
+        # empty --gs: use the glyco standardize glycan guesser on this Universe
+        self.gly_sel = resolve_glycan_selection(self.u, self.gly_sel, self._error)
         self._validate_atom_selections()
 
     @classmethod

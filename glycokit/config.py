@@ -1,3 +1,4 @@
+import os
 import re
 
 import MDAnalysis as mda
@@ -9,6 +10,8 @@ DEFAULT_OUTDIR_NAME = "glyco_output"
 
 # Blocking tests allowed per counting mode; the first one is the default.
 _BLOCKING_TESTS = {"default": ("vdw", "cylinder"), "v1": ("box",), "v2": ("cylinder",)}
+
+COMPARE_ENV_PREFIX = "GLYCO_COMPARE_"
 
 # Hydrogen atom names: optional leading digits then 'H' (H1, HB2, 1HB, HO2).
 # Anchored at the START so heavy atoms like NH1, OH, CH2 are not matched.
@@ -47,6 +50,27 @@ OUTPUT_FILES = {
     VMD_SCRIPT_NAME: "write_vmd",
 }
 
+# Built-in defaults. GLYCO_COMPARE_<NAME> overrides them; command-line
+# options override both. String defaults go through the option's ``type``.
+COMPARE_DEFAULTS = {
+    "PDB": "../data/gper_std.pdb",
+    "PROBE": 1.4,
+    "AREA_CUTOFF": 30.0,
+    "DISTANCE_CUTOFF": 30.0,
+    "CYLINDER_RADIUS": 1.4,
+    "PROTEIN_SELECTION": "protein",
+    "GLYCANS": None,  # legacy -glycan / -glycans argument
+    "GLYCAN_SELECTION": "",  # empty: "resname <GLYCANS>"
+    "N_WORKERS": 8,
+    "SASA_TOLERANCE": 0.006,  # legacy RSA output is rounded to 2 decimals
+    "V1_ROOT": "/home/r2/opt/GLYCO",
+    "V2_ROOT": "/home/r2/opt/GLYCO-2",
+    "V1_ENV": "GLYCO",
+    "V2_ENV": "GLYCO2",
+    "GLYCO_COMMAND": "glyco run",  # split like a shell command line
+}
+
+
 # Errors MDAnalysis raises for an invalid or unsupported selection string:
 # SelectionError for parse errors / unknown keywords, NoDataError (a subclass
 # of ValueError and AttributeError) for missing topology attributes such as
@@ -75,3 +99,9 @@ _JOB_ERRORS = (
     RuntimeError,
     mda.exceptions.SelectionError,
 )
+
+
+def _compare_default(name):
+    """GLYCO_COMPARE_<name> if set, else the built-in default."""
+    value = os.environ.get(COMPARE_ENV_PREFIX + name, "").strip()
+    return value if value else COMPARE_DEFAULTS[name]

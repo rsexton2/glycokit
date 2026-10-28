@@ -382,57 +382,55 @@ def _warn_ignored_options(cfg, blocking):
         )
 
 
-def validate_arguments(cfg, fail, check_inputs=True, warn=True):
+def _validate_inputs(cfg, fail):
     """
-    Validate and normalize run parameters.
-
-    Sets ``cfg.structures``, normalizes ``cfg.frame_list`` and fills
-    ``cfg.outdir`` if empty. ``cfg`` must carry every :func:`base_parser`
-    destination.
+    Validate -a/--top, -b/--traj and --indir, and set ``cfg.structures``.
 
     :param cfg: Parameters to validate (modified in place).
     :type cfg: argparse.Namespace or GlycoAnalysis
     :param callable fail: Called with a message on invalid input; must not
         return.
-    :param bool check_inputs: Also validate input files / directories.
     """
     top_given = cfg.top is not None
     traj_given = bool(cfg.traj)
     indir_given = cfg.indir is not None
-    cfg.structures = []
 
-    if check_inputs:
-        if not top_given and not indir_given:
-            fail("one of -a/--top(+-b/--traj) or --indir must be given")
-        if indir_given and (top_given or traj_given):
-            fail("--indir is mutually exclusive with -a/--top and -b/--traj")
-        if traj_given and not top_given:
-            fail("-b/--traj requires -a/--top")
+    if not top_given and not indir_given:
+        fail("one of -a/--top(+-b/--traj) or --indir must be given")
+    if indir_given and (top_given or traj_given):
+        fail("--indir is mutually exclusive with -a/--top and -b/--traj")
+    if traj_given and not top_given:
+        fail("-b/--traj requires -a/--top")
 
-        if top_given:
-            if not os.path.isfile(cfg.top):
-                fail(f"-a/--top: no such file: {cfg.top!r}")
-            for t in cfg.traj or []:
-                if not os.path.isfile(t):
-                    fail(f"-b/--traj: no such file: {t!r}")
-        else:
-            if not os.path.isdir(cfg.indir):
-                fail(f"--indir: no such directory: {cfg.indir!r}")
-            extensions = [
-                e.strip().lstrip(".") for e in cfg.in_types.split(",") if e.strip()
-            ]
-            structures = find_structures(cfg.indir, extensions)
-            if not structures:
-                fail(
-                    f"--indir: no files with extension(s) {extensions} "
-                    f"found in {cfg.indir!r}"
-                )
-            cfg.structures = structures
+    if top_given:
+        if not os.path.isfile(cfg.top):
+            fail(f"-a/--top: no such file: {cfg.top!r}")
+        for t in cfg.traj or []:
+            if not os.path.isfile(t):
+                fail(f"-b/--traj: no such file: {t!r}")
+        return
 
-    if not (cfg.gly_sel or "").strip():
-        fail("--gs/--gly-sel is required (MDAnalysis selection of the glycan atoms)")
+    if not os.path.isdir(cfg.indir):
+        fail(f"--indir: no such directory: {cfg.indir!r}")
+    extensions = [e.strip().lstrip(".") for e in cfg.in_types.split(",") if e.strip()]
+    structures = find_structures(cfg.indir, extensions)
+    if not structures:
+        fail(f"--indir: no files with extension(s) {extensions} found in {cfg.indir!r}")
+    cfg.structures = structures
 
-    # counting mode and blocking test
+
+def _validate_mode(cfg, fail, warn=True):
+    """
+    Validate --mode and --blocking and return the resolved blocking test.
+
+    :param cfg: Parameters to validate.
+    :type cfg: argparse.Namespace or GlycoAnalysis
+    :param callable fail: Called with a message on invalid input; must not
+        return.
+    :param bool warn: Warn about legacy modes on non-PDB inputs.
+    :return: The blocking test (``--blocking``, or the mode's default).
+    :rtype: str
+    """
     if cfg.mode not in _BLOCKING_TESTS:
         fail(f"--mode must be one of {sorted(_BLOCKING_TESTS)}, got {cfg.mode!r}")
     allowed = _BLOCKING_TESTS[cfg.mode]
@@ -449,56 +447,72 @@ def validate_arguments(cfg, fail, check_inputs=True, warn=True):
         )
 
     if cfg.mode != "default" and warn:
-        files = [cfg.top] if top_given else list(cfg.structures)
+        files = [cfg.top] if cfg.top is not None else list(cfg.structures)
         non_pdb = [f for f in files if Path(f).suffix.lower() not in (".pdb", ".ent")]
         if non_pdb:
             warnings.warn(
                 f"--mode {cfg.mode} needs PDB record types; may fail for {non_pdb[:3]}",
-                stacklevel=2,
+                stacklevel=3,
             )
+    return blocking
 
-    # frames
-    slice_given = any(
-        v is not None for v in (cfg.frame_start, cfg.frame_stop, cfg.frame_step)
-    )
+
+def _empty_forward_slice(start, stop, step):
+    """True for a non-negative forward --start/--stop/--step that selects no frames."""
+    if start is None or stop is None or start < 0 or stop < 0:
+        return False
+    return (step is None or step > 0) and start >= stop
+
+
+def _validate_frames(cfg, fail):
+    """
+    Validate the frame selection and normalize ``cfg.frame_list``.
+
+    :param cfg: Parameters to validate (modified in place).
+    :type cfg: argparse.Namespace or GlycoAnalysis
+    :param callable fail: Called with a message on invalid input; must not
+        return.
+    """
+    start, stop, step = cfg.frame_start, cfg.frame_stop, cfg.frame_step
+    slice_given = any(v is not None for v in (start, stop, step))
     frames_given = bool(cfg.frame_list)
+
     if frames_given and slice_given:
         fail("--frames is not allowed with --start/--stop/--step")
-
-    if indir_given and (frames_given or slice_given):
+    if cfg.indir is not None and (frames_given or slice_given):
         fail(
             "--frames/--start/--stop/--step are not meaningful with --indir "
             "(each structure is a single, independent frame)"
         )
-
-    if cfg.frame_step is not None and cfg.frame_step == 0:
+    if step is not None and step == 0:
         fail("--step cannot be 0")
-
-    start, stop, step = cfg.frame_start, cfg.frame_stop, cfg.frame_step
-    if (
-        start is not None
-        and stop is not None
-        and start >= 0
-        and stop >= 0
-        and (step is None or step > 0)
-        and start >= stop
-    ):
+    if _empty_forward_slice(start, stop, step):
         fail(f"--start ({start}) must be less than --stop ({stop})")
 
-    if frames_given:
-        try:
-            frame_ints = [int(f) for f in cfg.frame_list]
-        except (TypeError, ValueError) as exc:
-            fail(f"--frames must be integers, got {cfg.frame_list!r}")
-            raise AssertionError("error() must not return") from exc  # unreachable
-
-        if any(f < 0 for f in frame_ints):
-            fail("--frames must be non-negative")
-        cfg.frame_list = frame_ints
-    else:
+    if not frames_given:
         cfg.frame_list = None
+        return
+    try:
+        frame_ints = [int(f) for f in cfg.frame_list]
+    except (TypeError, ValueError) as exc:
+        fail(f"--frames must be integers, got {cfg.frame_list!r}")
+        raise AssertionError("fail() must not return") from exc  # unreachable
+    if any(f < 0 for f in frame_ints):
+        fail("--frames must be non-negative")
+    cfg.frame_list = frame_ints
 
-    # numeric parameters
+
+def _validate_numbers(cfg, fail):
+    """
+    Validate the numeric parameters (cutoffs, radii, probe, worker count).
+
+    ``not value > 0`` is deliberate: unlike ``value <= 0`` it also rejects NaN.
+
+    :param cfg: Parameters to validate.
+    :type cfg: argparse.Namespace or GlycoAnalysis
+    :param callable fail: Called with a message on invalid input; must not
+        return.
+    """
     positive = {
         "distance_cutoff": "--dc",
         "area_cutoff": "--ac",
@@ -508,21 +522,79 @@ def validate_arguments(cfg, fail, check_inputs=True, warn=True):
     }
     for name, flag in positive.items():
         value = getattr(cfg, name)
-        if value is not None and not value > 0:
+        if value is not None and not value > 0:  # pylint: disable=unnecessary-negation
             fail(f"{flag} must be positive, got {value}")
 
-    if cfg.vdw_probe is not None and not cfg.vdw_probe >= 0:
-        fail(f"--vdw-probe must be non-negative, got {cfg.vdw_probe}")
+    probe = cfg.vdw_probe
+    if probe is not None and not probe >= 0:  # pylint: disable=unnecessary-negation
+        fail(f"--vdw-probe must be non-negative, got {probe}")
 
     n = cfg.n_workers
     if isinstance(n, bool) or not isinstance(n, int) or (n != -1 and n < 1):
         fail(f"--n-workers must be -1 or an integer >= 1, got {n!r}")
 
+
+def resolve_glycan_selection(universe, gly_sel, fail):
+    """
+    ``gly_sel``, or the selection from the standardize glycan guesser if empty.
+
+    :param callable fail: Called with a message if nothing is detected.
+    :rtype: str
+    """
+    if gly_sel and gly_sel.strip():
+        return gly_sel
+    # standardize imports parsers; imported here to keep utils import-light
+    # pylint: disable-next=import-outside-toplevel
+    from glycokit.standardize import glycan_selection, guess_glycans
+
+    names, _ = guess_glycans(universe)
+    selection = glycan_selection(names)
+    if not selection:
+        fail("--gs not given and no glycan residues were detected; pass --gs")
+    info(f"--gs not given: using {style(selection, 'cyan')} (glycan guesser)")
+    return selection
+
+
+def validate_arguments(cfg, fail, check_inputs=True, warn=True):
+    """
+    Validate and normalize run parameters.
+
+    Sets ``cfg.structures``, normalizes ``cfg.frame_list`` and fills
+    ``cfg.outdir`` if empty. ``cfg`` must carry every :func:`base_parser`
+    destination.
+
+    :param cfg: Parameters to validate (modified in place).
+    :type cfg: argparse.Namespace or GlycoAnalysis
+    :param callable fail: Called with a message on invalid input; must not
+        return.
+    :param bool check_inputs: Also validate input files / directories.
+    :param bool warn: Warn about options without effect and non-PDB inputs
+        in legacy modes.
+    """
+    cfg.structures = []
+    if check_inputs:
+        _validate_inputs(cfg, fail)
+
+    blocking = _validate_mode(cfg, fail, warn)
+    _validate_frames(cfg, fail)
+    _validate_numbers(cfg, fail)
+
     if warn:
         _warn_ignored_options(cfg, blocking)
-
     if not cfg.outdir:
         cfg.outdir = default_outdir(cfg)
+
+
+def _ask_yes_no(question):
+    """Prompt until the answer is yes or no; EOF or empty means no."""
+    while True:
+        try:
+            answer = input(question).strip().lower()
+        except EOFError:
+            return False
+        if answer in ("y", "yes", "", "n", "no"):
+            return answer in ("y", "yes")
+        print("Please answer 'y' or 'n'.")
 
 
 def default_outdir(cfg):
@@ -578,21 +650,7 @@ def confirm_overwrite(outdir, cfg):
             "prompt, pass --force to overwrite non-interactively"
         )
         return False
-
-    while True:
-        try:
-            answer = (
-                input(f"{outdir!r} already contains: {listing}. Overwrite? [y/N] ")
-                .strip()
-                .lower()
-            )
-        except EOFError:
-            return False
-        if answer in ("y", "yes"):
-            return True
-        if answer in ("", "n", "no"):
-            return False
-        print("Please answer 'y' or 'n'.")
+    return _ask_yes_no(f"{outdir!r} already contains: {listing}. Overwrite? [y/N] ")
 
 
 def load_universe(top, traj=None):

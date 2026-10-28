@@ -7,8 +7,12 @@ Inputs come from conftest.py options, e.g.
     pytest -n auto --dist loadgroup --glyco-order slow-first
 """
 
+# pytest fixtures arrive as arguments, so these limits don't fit tests
+# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+
 import csv
 import hashlib
+import inspect
 import itertools
 import json
 import logging
@@ -19,9 +23,10 @@ import numpy as np
 import pytest
 from MDAnalysis.coordinates.memory import MemoryReader
 
-from glycokit.glyco import GlycoAnalysis, _parser_defaults
+from glycokit.glyco import GlycoAnalysis
 from glycokit.tests.glyco_cases import MODE_SPECS
 from glycokit.tests.sasa_probe import capture
+from glycokit.utils import _parser_defaults
 
 EXPECTED_FILES = (
     "b_factors.pdb",
@@ -42,18 +47,6 @@ BLOCKER_MODES = ("default", "default-cylinder", "v2")
 # --------------------------------------------------------------------------
 # helpers: constant-memory file comparison
 # --------------------------------------------------------------------------
-
-
-def _analyzed(analysis):
-    """Trajectory frame index of each analyzed frame (public result)."""
-    return np.asarray(analysis.results.trajectory_frames)
-
-
-def _last_analyzed(run):
-    analyzed = _analyzed(run.analysis)
-    if len(analyzed) < 2:
-        pytest.skip("needs at least two analysed frames")
-    return len(analyzed) - 1, int(analyzed[-1])
 
 
 def file_digest(path, algorithm="sha256"):
@@ -110,12 +103,33 @@ def iter_csv(path):
 # --------------------------------------------------------------------------
 
 
+@pytest.fixture(name="first_case")
+def fixture_first_case(pytestconfig):
+    """The first configured structure; skips without structures."""
+    if not pytestconfig.glyco_cases:
+        pytest.skip("no structures given")
+    return pytestconfig.glyco_cases[0]
+
+
+def _make_analysis(glyco, glyco_params, case, universe=None, **overrides):
+    """GlycoAnalysis for ``case`` with the case parameters plus ``overrides``."""
+    if universe is None:
+        universe = glyco.load_universe(case.top, list(case.traj) or None)
+    return glyco.GlycoAnalysis(universe, **{**glyco_params(case), **overrides})
+
+
+def _analyzed(analysis):
+    """Trajectory frame index of each analyzed frame (public result)."""
+    return np.asarray(analysis.results.trajectory_frames)
+
+
 def ca_keys(analysis):
     """(chain, resid+icode, resname) of every CA column, as the CSVs write them."""
     return analysis.residue_identity()
 
 
 def unique_ca_keys(analysis):
+    """CA keys; skips if they cannot identify residues uniquely."""
     keys = ca_keys(analysis)
     if len(set(keys)) != len(keys):
         pytest.skip(
@@ -168,29 +182,21 @@ def _mode_cli_args(mode):
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture(name="first_case")
-def fixture_first_case(pytestconfig):
-    """The first configured structure; skips without structures."""
-    if not pytestconfig.glyco_cases:
-        pytest.skip("no structures given")
-    return pytestconfig.glyco_cases[0]
-
-
-def _make_analysis(glyco, glyco_params, case, universe=None, **overrides):
-    """GlycoAnalysis for ``case`` with the case parameters plus ``overrides``."""
-    if universe is None:
-        universe = glyco.load_universe(case.top, list(case.traj) or None)
-    return glyco.GlycoAnalysis(universe, **{**glyco_params(case), **overrides})
-
-
 def test_parameters_are_declared():
     """Every base_parser() destination has a class annotation (keeps E1101 meaningful)."""
-    declared = set(vars(GlycoAnalysis).get("__annotations__", {}))
+    declared = set(inspect.get_annotations(GlycoAnalysis))
     destinations = set(_parser_defaults())
     missing = sorted(destinations - declared)
     stale = sorted(declared - destinations)
     assert not missing, f"parser destinations without an annotation: {missing}"
     assert not stale, f"annotations that are not parser destinations: {stale}"
+
+
+def test_unknown_parameter_rejected(glyco, glyco_params, first_case):
+    """Typos in keyword arguments fail instead of being ignored."""
+    u = glyco.load_universe(first_case.top, list(first_case.traj) or None)
+    with pytest.raises(TypeError, match="vdw_scale"):
+        glyco.GlycoAnalysis(u, **glyco_params(first_case), vdw_scal=0.8)
 
 
 def test_histograms_stored_once(glyco, glyco_params, first_case):
@@ -205,6 +211,7 @@ def test_histograms_stored_once(glyco, glyco_params, first_case):
     assert values is again_values is analysis.results.count_values
     assert hist.shape[0] == len(analysis.prot_atoms)
     assert not hist.flags.writeable
+    assert not values.flags.writeable
 
 
 def test_histograms_before_run_raise(glyco, glyco_params, first_case):
@@ -229,40 +236,48 @@ def test_v1_without_record_types_warns(glyco, glyco_params, first_case):
         _make_analysis(glyco, glyco_params, first_case, universe=u, mode="v1")
 
 
+def test_bad_trajectory_load_is_value_error(glyco, first_case, tmp_path):
+    """Without a parser, an unreadable trajectory is reported as ValueError."""
+    bad = tmp_path / "bad.xtc"
+    bad.write_bytes(b"not a trajectory")
+
+    with pytest.raises(ValueError, match="could not load") as exc_info:
+        # args is only used after a successful load, so None is enough here
+        glyco._run_job(  # pylint: disable=protected-access
+            None,
+            first_case.top,
+            [str(bad)],
+            str(tmp_path / "out"),
+            verbose=False,
+        )
+
+    assert "with -b/--traj" in str(exc_info.value)  # trajectory-specific hint
+    assert exc_info.value.__cause__ is not None  # original load error is chained
+
+
 def test_bad_trajectory_load_cli_exit(
-    glyco, glyco_cli_args, pytestconfig, tmp_path, capsys
+    glyco, glyco_cli_args, first_case, tmp_path, capsys
 ):
     """Through main(), an unreadable trajectory is a usage error (exit 2)."""
-    if not pytestconfig.glyco_cases:
-        pytest.skip("no structures given")
-    case = pytestconfig.glyco_cases[0]
-
     bad = tmp_path / "bad.xtc"
     bad.write_bytes(b"not a trajectory")
     argv = [
         "-a",
-        case.top,
+        first_case.top,
         "-b",
         str(bad),
-        *glyco_cli_args(case),
+        *glyco_cli_args(first_case),
         "-o",
         str(tmp_path / "out"),
         "--force",
     ]
-    with pytest.raises(SystemExit) as exc_info:
-        glyco.main(argv)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            glyco.main(argv)
+    finally:
+        logging.captureWarnings(False)
     assert exc_info.value.code == 2
     assert "could not load" in capsys.readouterr().err
-
-
-def test_unknown_parameter_rejected(glyco, glyco_params, pytestconfig):
-    """Typos in keyword arguments fail instead of being ignored."""
-    if not pytestconfig.glyco_cases:
-        pytest.skip("no structures given")
-    case = pytestconfig.glyco_cases[0]
-    u = glyco.load_universe(case.top, list(case.traj) or None)
-    with pytest.raises(TypeError, match="vdw_scale"):
-        glyco.GlycoAnalysis(u, **glyco_params(case), vdw_scal=0.8)
 
 
 # --------------------------------------------------------------------------
@@ -309,6 +324,7 @@ def test_frame_summary(case, mode, runner):
         assert int(row["trajectory_frame"]) == analyzed[k]
         assert int(row["n_surface_residues"]) == a.results.n_surface_residues[k]
 
+        # distinct residues among the surface start atoms of frame k
         start_idx = a.surface_start_indices(k)
         expected = len(np.unique(a.start_atoms.resindices[start_idx]))
         assert a.results.n_surface_residues[k] == expected
@@ -430,7 +446,7 @@ def test_cli_matches_library(
     finally:
         logging.captureWarnings(False)
 
-    _assert_positive_radii(probe["calls"], "CLI")  # pylint: disable=unsubscriptable-object
+    _assert_positive_radii(probe["calls"], "CLI")
     for name in (*COMPARED_CSVS, "frame_summary.csv"):
         assert_same_file(r.outdir / name, cli_dir / name, f"CLI vs library: {name}")
     np.testing.assert_array_equal(
@@ -443,10 +459,8 @@ def test_bfactors_pdb_per_residue(case, mode, runner, glyco):
     r = runner(case, mode)
     a = r.analysis
     u = glyco.mda.Universe(str(r.outdir / "b_factors.pdb"))
-
     k = -1 if a.bfactor_frame is None else a.bfactor_frame
     expected = dict(zip(a.prot_atoms.resindices.tolist(), a.all_counts[k].tolist()))
-
     for res in u.residues:
         values = set(res.atoms.tempfactors.round(2).tolist())
         assert len(values) == 1, f"{res}: several B-factors {sorted(values)}"
@@ -485,28 +499,6 @@ def test_get_blockers_rejects_box_test(case, mode, runner):
 # --------------------------------------------------------------------------
 # trajectories
 # --------------------------------------------------------------------------
-
-
-def test_bad_trajectory_load_is_reported(
-    glyco, glyco_cli_args, first_case, tmp_path, capsys
-):
-    """A trajectory that cannot be read is a usage error, not a traceback."""
-    bad = tmp_path / "bad.xtc"
-    bad.write_bytes(b"not a trajectory")
-    argv = [
-        "-a",
-        first_case.top,
-        "-b",
-        str(bad),
-        *glyco_cli_args(first_case),
-        "-o",
-        str(tmp_path / "out"),
-        "--force",
-    ]
-    with pytest.raises(SystemExit) as exc:
-        glyco.main(argv)
-    assert exc.value.code == 2
-    assert "could not load" in capsys.readouterr().err
 
 
 @pytest.mark.glyco_kind("trajectory")
@@ -565,8 +557,7 @@ def test_get_blockers_ignores_trajectory_position(case, mode, runner):
         explicit = a.get_blockers(start_idx=a.surface_start_indices(k_last))
         assert traj.frame == other, "get_blockers(start_idx=...) moved the trajectory"
     finally:
-        traj[old]  # pylint: disable=pointless-statement
-        # runner results are shared
+        traj[old]  # pylint: disable=pointless-statement  # runner results are shared
 
     for label, (blockers, dists) in (
         ("cached path", cached),
