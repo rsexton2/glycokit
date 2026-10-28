@@ -49,7 +49,7 @@ Install the development and documentation dependencies:
 
 ```
 conda env update --name glycokit --file devtools/conda-envs/test_env.yaml
-conda env update --name glycokit --file docs/requirements.yaml
+conda env update --name glycokit --file requirements.yaml
 ```
 
 Build this package from source:
@@ -94,7 +94,7 @@ Copyright (c) 2026, Ricky Sexton
 
 
 #### Acknowledgements
- 
-Project based on the 
+
+Project based on the
 [MDAnalysis Cookiecutter](https://github.com/MDAnalysis/cookiecutter-mda) version 0.1.
 Please cite [MDAnalysis](https://github.com/MDAnalysis/mdanalysis#citation) when using GlyCoKit in published work.
