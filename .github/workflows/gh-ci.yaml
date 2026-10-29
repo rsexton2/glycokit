@@ -19,14 +19,14 @@ defaults:
 
 jobs:
   main-tests:
-    if: "github.repository == 'rsexton2/glycokit'"
+    if: ${{ github.repository == 'rsexton2/glycokit' || github.event.act }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macOS-latest, windows-latest]
-        mdanalysis-version: ["latest", "develop"]
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+        mdanalysis-version: ["latest", "develop"]
 
     steps:
       - uses: actions/checkout@v4
@@ -41,38 +41,48 @@ jobs:
         uses: conda-incubator/setup-miniconda@v4
         with:
           python-version: ${{ matrix.python-version }}
-          environment-file: devtools/conda-envs/test_env.yaml
+          environment-file: environment.yml
           add-pip-as-python-dependency: true
           miniforge-version: "latest"
           use-mamba: true
           channels: conda-forge
           activate-environment: glycokit-test
           auto-update-conda: true
-          auto-activate-base: false
+          auto-activate: false
           show-channel-urls: true
+
+      - name: Ensure MDAnalysis is installed in the test env
+        run: |
+          if [ "${{ matrix.mdanalysis-version }}" = "develop" ]; then
+            conda run -n glycokit-test python -m pip install --no-deps git+https://github.com/MDAnalysis/mdanalysis.git@develop#subdirectory=package
+          else
+            conda run -n glycokit-test python -m pip install --no-deps mdanalysis
+          fi
 
       - name: Install package
         run: |
-          conda activate glycokit-test
-          python --version
-          python -m pip install . --no-deps
+          conda run -n glycokit-test python -m pip install . --no-deps
 
       - name: Python information
         run: |
-          conda activate glycokit-test
-          which python
-          which pip
-          pip list
-          conda info
-          conda list
+          conda run -n glycokit-test python - <<'PY'
+          import sys
+          import importlib.util
+          print("python:", sys.executable)
+          print("MDAnalysis installed:", importlib.util.find_spec("MDAnalysis") is not None)
+          PY
 
       - name: Run tests
         run: |
-          conda activate glycokit-test
-          pytest --cov=. --junitxml=junit.xml -o junit_family=legacy --cov-report=xml:coverage.xml --cov-report=term
+          conda run -n glycokit-test python -m pytest \
+            --cov=. \
+            --junitxml=junit.xml \
+            -o junit_family=legacy \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term
 
-      - name: codecov
-        if: github.repository == 'rsexton2/glycokit' && github.event_name != 'schedule'
+      - name: Upload coverage
+        if: ${{github.repository == 'rsexton2/glycokit' && github.event_name != 'schedule' && !env.ACT }}
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
@@ -82,7 +92,7 @@ jobs:
           fail_ci_if_error: true
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        if: ${{github.repository == 'rsexton2/glycokit' && github.event_name != 'schedule' && !env.ACT }}
         uses: codecov/codecov-action@v5
         with:
           files: junit.xml
@@ -104,9 +114,8 @@ jobs:
 
       - name: Install Pylint
         run: |
-          which pip
-          which python
-          pip install pylint mdanalysis
+          python -m pip install --upgrade pip
+          python -m pip install pylint mdanalysis
 
       - name: Run Pylint
         env:
@@ -128,7 +137,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pipx twine
+          python -m pip install --upgrade pip
+          python -m pip install pipx twine
 
       - name: Build package
         run: |

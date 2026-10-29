@@ -1,0 +1,15 @@
+name: glycokit
+channels:
+  - conda-forge
+dependencies:
+  - mdanalysis
+  - freesasa
+  - scipy
+  - ipython
+  - numpy
+  - pytest
+  - pytest-cov
+  - ca-certificates
+  - certifi
+  - openssl
+prefix: /home/r2/miniforge3/envs/glycotest

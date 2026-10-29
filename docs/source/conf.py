@@ -114,7 +114,7 @@ pygments_style = "default"
 #
 # html_theme = "mdanalysis_sphinx_theme"
 html_theme = "furo"
-html_title = "GlyCo (glycokit)"
+html_title = "GLYCO"
 # Code highlighting for each mode
 pygments_style = "sphinx"
 pygments_dark_style = "monokai"
@@ -186,7 +186,7 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, "glycokit.tex", "GlyCoKit Documentation", "glycokit", "manual"),
+    (master_doc, "glycokit.tex", "GlycoKit Documentation", "glycokit", "manual"),
 ]
 
 
@@ -194,7 +194,7 @@ latex_documents = [
 
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
-man_pages = [(master_doc, "glycokit", "GlyCoKit Documentation", [author], 1)]
+man_pages = [(master_doc, "glycokit", "GlycoKit Documentation", [author], 1)]
 
 
 # -- Options for Texinfo output ----------------------------------------------
@@ -206,7 +206,7 @@ texinfo_documents = [
     (
         master_doc,
         "glycokit",
-        "GlyCoKit Documentation",
+        "GlycoKit Documentation",
         author,
         "glycokit",
         "Glycan analyses",
