@@ -9,19 +9,12 @@ import math
 import pytest
 
 from glycokit._cli_common import (
-    n_workers_int,
-    non_negative_float,
-    positive_float,
+    n_workers_int, non_negative_float, positive_float,
 )
-from glycokit.parsers import (
-    base_parser,
-    compare_parser,
-    standardize_parser,
-)
+from glycokit.parsers import base_parser, compare_parser, standardize_parser
 from glycokit.standardize import StandardizeOptions
 
 NAN_SPELLINGS = ("nan", "NaN", "-nan")
-
 
 # --------------------------------------------------------------------------
 # type functions called directly
@@ -30,13 +23,7 @@ NAN_SPELLINGS = ("nan", "NaN", "-nan")
 
 @pytest.mark.parametrize(
     "text, expected",
-    [
-        ("1", 1.0),
-        ("0.5", 0.5),
-        ("30", 30.0),
-        ("1e-6", 1e-6),
-        (" 2.5 ", 2.5),
-    ],
+    [("1", 1.0), ("0.5", 0.5), ("30", 30.0), ("1e-6", 1e-6), (" 2.5 ", 2.5), ],
 )
 def test_positive_float_accepts(text, expected):
     value = positive_float(text)
@@ -44,7 +31,8 @@ def test_positive_float_accepts(text, expected):
     assert value == expected
 
 
-@pytest.mark.parametrize("text", ["0", "0.0", "-0.0", "-1", "-1e-9", *NAN_SPELLINGS])
+@pytest.mark.parametrize(
+    "text", ["0", "0.0", "-0.0", "-1", "-1e-9", *NAN_SPELLINGS])
 def test_positive_float_rejects_non_positive(text):
     with pytest.raises(argparse.ArgumentTypeError, match="must be positive"):
         positive_float(text)
@@ -52,13 +40,7 @@ def test_positive_float_rejects_non_positive(text):
 
 @pytest.mark.parametrize(
     "text, expected",
-    [
-        ("0", 0.0),
-        ("-0.0", 0.0),
-        ("0.0", 0.0),
-        ("1.4", 1.4),
-        ("1e-9", 1e-9),
-    ],
+    [("0", 0.0), ("-0.0", 0.0), ("0.0", 0.0), ("1.4", 1.4), ("1e-9", 1e-9), ],
 )
 def test_non_negative_float_accepts(text, expected):
     value = non_negative_float(text)
@@ -87,7 +69,8 @@ def test_float_types_accept_infinity(func):
     assert math.isinf(func("inf"))
 
 
-@pytest.mark.parametrize("text, expected", [("-1", -1), ("1", 1), ("8", 8), (" 4 ", 4)])
+@pytest.mark.parametrize(
+    "text, expected", [("-1", -1), ("1", 1), ("8", 8), (" 4 ", 4)])
 def test_n_workers_int_accepts(text, expected):
     value = n_workers_int(text)
     assert isinstance(value, int) and not isinstance(value, bool)
@@ -124,12 +107,9 @@ def _parse_error(argv, capsys):
 
 
 POSITIVE_OPTIONS = [
-    ("--dc", "distance_cutoff"),
-    ("--distance-cutoff", "distance_cutoff"),
-    ("--cr", "cylinder_radius"),
-    ("--vdw-scale", "vdw_scale"),
-    ("--ac", "area_cutoff"),
-    ("--pr", "sasa_probe"),
+    ("--dc", "distance_cutoff"), ("--distance-cutoff", "distance_cutoff"),
+    ("--cr", "cylinder_radius"), ("--vdw-scale", "vdw_scale"),
+    ("--ac", "area_cutoff"), ("--pr", "sasa_probe"),
 ]
 
 
@@ -159,10 +139,8 @@ def test_base_parser_n_workers_accepts(flag):
 
 
 @pytest.mark.parametrize(
-    "value, message",
-    [
-        ("0", "must be -1 or >= 1"),
-        ("-2", "must be -1 or >= 1"),
+    "value, message", [
+        ("0", "must be -1 or >= 1"), ("-2", "must be -1 or >= 1"),
         ("2.5", "invalid n_workers_int value"),
     ],
 )
@@ -215,25 +193,25 @@ def test_compare_parser_cli_values(capsys):
 
 
 @pytest.mark.parametrize(
-    "env, value, dest, expected",
-    [
+    "env, value, dest, expected", [
         ("GLYCO_COMPARE_DISTANCE_CUTOFF", "26.5", "distance_cutoff", 26.5),
         ("GLYCO_COMPARE_N_WORKERS", "-1", "n_workers", -1),
     ],
 )
-def test_compare_parser_env_defaults_converted(monkeypatch, env, value, dest, expected):
+def test_compare_parser_env_defaults_converted(
+        monkeypatch, env, value, dest, expected):
     monkeypatch.setenv(env, value)
     assert getattr(compare_parser().parse_args([]), dest) == expected
 
 
 @pytest.mark.parametrize(
-    "env, value, message",
-    [
+    "env, value, message", [
         ("GLYCO_COMPARE_DISTANCE_CUTOFF", "0", "must be positive"),
         ("GLYCO_COMPARE_N_WORKERS", "0", "must be -1 or >= 1"),
     ],
 )
-def test_compare_parser_env_defaults_rejected(monkeypatch, capsys, env, value, message):
+def test_compare_parser_env_defaults_rejected(
+        monkeypatch, capsys, env, value, message):
     """Invalid environment defaults fail like invalid options."""
     monkeypatch.setenv(env, value)
     with pytest.raises(SystemExit):
@@ -270,4 +248,5 @@ def test_standardize_parser_defaults_match_options():
     assert (not a.no_renumber_solvent) == o.renumber_blank_other
     assert (not a.no_terminal_oxygens) == o.terminal_oxygens
     assert (None if a.keep_his_names else "HIS") == o.histidine
-    assert ("warn" if a.allow_incomplete else "error") == o.incomplete_sidechains
+    assert (
+        "warn" if a.allow_incomplete else "error") == o.incomplete_sidechains

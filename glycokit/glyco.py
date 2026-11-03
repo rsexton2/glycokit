@@ -18,11 +18,8 @@ v2/cylinder       reproduces GLYCO-2
 
 from __future__ import annotations
 
-import contextlib
-import csv
 import difflib
 import json
-import operator
 import os
 import re
 import sys
@@ -36,7 +33,6 @@ from MDAnalysis.analysis.base import AnalysisBase, Results
 from MDAnalysis.guesser.default_guesser import DefaultGuesser
 from MDAnalysis.guesser.tables import vdwradii as VDW_RADII
 from scipy.spatial import cKDTree
-from scipy.stats import t as t_res
 
 from glycokit.config import (
     _BLOCKING_TESTS, _BOX_PREFILTER_EPS, _JOB_ERRORS, _KD_PAD, _LOAD_ERRORS,
@@ -47,17 +43,18 @@ from glycokit.console import (
 )
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import base_parser
+from glycokit.residue_output import ResidueOutputMixin
 from glycokit.utils import (
     _cylinder_blocked, _first_altloc, _fmt_float, _legacy_coords,
     _package_versions, _parser_defaults, _resid_labels, _sphere_blocked,
     box_pairs, build_box_grid, confirm_overwrite, heavy_atoms, load_universe,
-    pdb_atom_ids, resolve_device, resolve_glycan_selection, set_box_threads,
+    resolve_device, resolve_glycan_selection, resolve_workers, set_box_threads,
     validate_arguments,
 )
 from glycokit.warnlog import warning_log
 
 
-class GlycoAnalysis(AnalysisBase):
+class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
     """
     GLYCO (Glycan Coverage): glycan coverage of protein surface residues.
 
@@ -215,6 +212,13 @@ class GlycoAnalysis(AnalysisBase):
         """
         return cls(u, verbose=verbose, _parser=parser, _args=args, **overrides)
 
+    # hooks for ResidueOutputMixin
+    def _residue_column_atoms(self):
+        return self.prot_atoms
+
+    def _residue_values(self):
+        return self.results.glycan_counts
+
     # endregion
 
     # -------------------------------------------------------------
@@ -259,14 +263,8 @@ class GlycoAnalysis(AnalysisBase):
             number of available CPUs; KD-tree queries take -1 directly.
         :rtype: int
         """
-        n = int(self.n_workers)
-        if n == -1 and processes:
-            try:
-                return max(
-                    1, len(os.sched_getaffinity(0)))  # honours CPU limits
-            except AttributeError:
-                return max(1, os.cpu_count() or 1)
-        return n
+        return resolve_workers(self.n_workers) if processes else int(
+            self.n_workers)
 
     def _kd_query_kwargs(self):
         """
@@ -675,7 +673,6 @@ class GlycoAnalysis(AnalysisBase):
         self._n_res_rows = len(self._residue_resindices)
 
         # ---------------- FreeSASA ----------------
-        # ---------------- FreeSASA ----------------
         if self.skip_sasa:
             # no SASA: every start residue is a surface residue (see
             # surface_residue_rows); NaN marks the areas as not computed
@@ -762,13 +759,6 @@ class GlycoAnalysis(AnalysisBase):
         """
         Count visible glycan atoms for the current frame (AnalysisBase hook).
 
-        The ``--bfactor-frame`` frame is cached for the CSV writers.
-        """
-
-    def _single_frame(self):
-        """
-        Count visible glycan atoms for the current frame (AnalysisBase hook).
-
         The ``--bfactor-frame`` frame always runs on the CPU and is cached
         for the CSV writers; other frames use the GPU when enabled.
         """
@@ -812,8 +802,8 @@ class GlycoAnalysis(AnalysisBase):
 
     def _conclude(self):
         """Store the residue histograms and write the requested output files."""
-        (self.results.count_values, self.results.residue_histograms,
-         ) = self._compute_residue_histograms()
+        (self.results.count_values,
+         self.results.residue_histograms) = self.residue_histograms()
 
         if self._write_outputs:
             os.makedirs(self.outdir, exist_ok=True)
@@ -843,6 +833,7 @@ class GlycoAnalysis(AnalysisBase):
 
             self.write_run_config()
         self._frame_cache = None
+        self._gpu = None
 
     # endregion
 
@@ -1374,71 +1365,6 @@ class GlycoAnalysis(AnalysisBase):
     # region Frame Access
     # -------------------------------------------------------------
 
-    @contextlib.contextmanager
-    def _at_analyzed_frame(self, k):
-        """Temporarily move the trajectory to analyzed frame ``k``."""
-        old = int(self.u.trajectory.frame)
-        try:
-            self.u.trajectory[int(self._analyzed_frames()[k])]  # pylint: disable=expression-not-assigned
-
-            yield
-        finally:
-            self.u.trajectory[old]  # pylint: disable=pointless-statement
-
-    def _analyzed_frames(self):
-        """
-        Trajectory frame index of each analyzed frame.
-
-        :rtype: numpy.ndarray of int
-        """
-        frames = getattr(self, "frames", None)
-        if frames is not None and len(frames) == self.n_frames:
-            return np.asarray(frames, dtype=int)
-        return np.arange(self.n_frames)
-
-    def _resolve_frame_index(self, frame_index=None, n=None):
-        """
-        Normalize an index into the analyzed frames.
-
-        :param frame_index: Index (negative counts from the end); None means
-            the last analyzed frame.
-        :type frame_index: int or None
-        :param n: Number of analyzed frames; None uses ``n_frames``.
-        :type n: int or None
-        :rtype: int
-        :raises RuntimeError: Before :meth:`run`.
-        :raises ValueError: No frames or a non-integer index (library use).
-        :raises IndexError: Out of range (library use).
-        """
-        if n is None:
-            n = getattr(self, "n_frames", None)
-            if n is None:
-                raise RuntimeError(
-                    "frame indices are only defined after run() started")
-        n = int(n)
-        if n <= 0:
-            self._error(
-                "no frames to analyze (check --frames/--start/--stop/--step)")
-        if frame_index is None:
-            return n - 1
-        if isinstance(frame_index, bool):
-            self._error(
-                f"frame index (--bfactor-frame) must be an integer, got {frame_index!r}"
-            )
-        try:
-            k = operator.index(frame_index)
-        except TypeError:
-            self._error(
-                f"frame index (--bfactor-frame) must be an integer, got {frame_index!r}"
-            )
-        if not -n <= k < n:
-            self._error(
-                f"frame index (--bfactor-frame) {k} is out of range for {n} "
-                f"analyzed frame(s); valid values are {-n} to {n - 1}",
-                exc=IndexError,
-            )
-        return k + n if k < 0 else k
-
     def _frame_result(self, k, mode=None, blocking=None, need_blockers=False):
         """
         ``(start_idx, cand_keys, vis_keys, blockers, distances)`` of analyzed
@@ -1488,232 +1414,6 @@ class GlycoAnalysis(AnalysisBase):
             (str(c), str(r), str(n))
             for c, r, n in zip(chains, resids, resnames)
         ]
-
-    def _compute_residue_histograms(self):
-        """
-        Histograms of the per-frame glycan counts, computed from ``all_counts``.
-
-        :return: ``(values, hist)``; see :meth:`residue_histograms`.
-        :rtype: tuple[numpy.ndarray, numpy.ndarray]
-        """
-        counts = np.asarray(
-            self.all_counts, dtype=np.int64)  # (n_frames, n_res)
-        _, n_res = counts.shape
-        values = np.arange(int(counts.max(initial=0)) + 1)
-        hist = np.zeros((n_res, len(values)), dtype=np.int64)
-        rows = np.broadcast_to(np.arange(n_res), counts.shape)
-        np.add.at(hist, (rows.ravel(), counts.ravel()), 1)
-        # read-only: the stored arrays are shared by every caller
-        values.flags.writeable = False
-        hist.flags.writeable = False
-        return values, hist
-
-    def residue_histograms(self):
-        """
-        Histogram of every residue's glycan count over the analyzed frames.
-
-        Computed once at the end of :meth:`run` and stored in
-        ``results.count_values`` / ``results.residue_histograms``. Counts are
-        integers, so there is one bin per count value.
-
-        :return: ``(values, hist)``: ``values`` are the count values
-            ``0 .. max``; ``hist[i, v]`` is the number of frames in which
-            residue ``i`` (``prot_atoms`` order) had count ``values[v]``.
-            Both arrays are read-only.
-        :rtype: tuple[numpy.ndarray, numpy.ndarray]
-        :raises RuntimeError: Before :meth:`run` has finished.
-        """
-        self._require_run()
-        try:
-            return self.results.count_values, self.results.residue_histograms
-        except AttributeError:
-            raise RuntimeError(
-                f"{type(self).__name__}.residue_histograms() is available "
-                "after run() has finished") from None
-
-    def residue_statistics(self, confidence=0.95, method="percentile"):
-        """
-        Per-residue summary of the glycan counts over the analyzed frames.
-
-        :param float confidence: Interval coverage, between 0 and 1.
-        :param str method: ``'percentile'``: central interval of the per-frame
-            counts (how much coverage varies over the trajectory);
-            ``'mean'``: t-based confidence interval of the mean count.
-        :return: Arrays in ``prot_atoms`` order: ``mode`` (histogram maximum;
-            ties go to the lower count), ``mean``, ``std``, ``max``,
-            ``lower``, ``upper``, ``width`` and ``n_frames``.
-        :rtype: dict[str, numpy.ndarray]
-        :raises ValueError: On an invalid ``confidence`` or ``method``.
-        :raises RuntimeError: Before :meth:`run`.
-        """
-        if not 0 < confidence < 1:
-            raise ValueError(
-                f"confidence must be between 0 and 1, got {confidence}")
-        values, hist = self.residue_histograms()
-        counts = np.asarray(self.all_counts, dtype=float)
-        n = counts.shape[0]
-        mean = counts.mean(axis=0)
-        std = counts.std(axis=0, ddof=1) if n > 1 else np.zeros(counts.shape[1])
-        alpha = (1.0 - confidence) / 2.0
-
-        if method == "percentile":
-            lower, upper = np.percentile(
-                counts, [100 * alpha, 100 * (1 - alpha)], axis=0)
-        elif method == "mean":
-            if n > 1:
-                half = t_res.ppf(1 - alpha, n - 1) * std / np.sqrt(n)
-            else:
-                half = np.zeros_like(mean)
-            lower, upper = mean - half, mean + half
-        else:
-            raise ValueError(
-                f"method must be 'percentile' or 'mean', got {method!r}")
-
-        return {
-            "mode": values[np.argmax(hist, axis=1)].astype(float),
-            "mean": mean,
-            "std": std,
-            "max": counts.max(axis=0),
-            "lower": lower,
-            "upper": upper,
-            "width": upper - lower,
-            "n_frames": np.full(counts.shape[1], n),
-        }
-
-    def write_histograms_csv(self, output=None):
-        """
-        residue_histograms.csv: one row per (residue, count value) that occurs.
-
-        Columns: chain, resid, resname, glycan_count, n_frames, fraction.
-
-        :param output: Default ``<outdir>/residue_histograms.csv``.
-        :type output: str or pathlib.Path or None
-        :rtype: pathlib.Path
-        :raises RuntimeError: Before :meth:`run`.
-        """
-        values, hist = self.residue_histograms()
-        names, cols = self._identity_columns(self.prot_atoms, atoms=False)
-        n_frames = self.all_counts.shape[0]
-
-        def batches():
-            for i in range(hist.shape[0]):
-                nz = np.flatnonzero(hist[i])
-                ident = [c[i] for c in cols]
-                yield (
-                    [
-                        *ident,
-                        int(values[v]),
-                        int(hist[i, v]),
-                        _fmt_float(hist[i, v] / n_frames),
-                    ] for v in nz)
-
-        return self._write_csv(
-            output, "residue_histograms.csv",
-            [*names, "glycan_count", "n_frames", "fraction"], batches(),
-            "Residue histograms",
-        )
-
-    def write_statistics_csv(
-            self, output=None, confidence=0.95, method="percentile"):
-        """
-        residue_statistics.csv: mode, mean, std, max and interval per residue.
-
-        :param output: Default ``<outdir>/residue_statistics.csv``.
-        :type output: str or pathlib.Path or None
-        :param float confidence: See :meth:`residue_statistics`.
-        :param str method: See :meth:`residue_statistics`.
-        :rtype: pathlib.Path
-        """
-        stats = self.residue_statistics(confidence, method)
-        names, cols = self._identity_columns(self.prot_atoms, atoms=False)
-        keys = ("mode", "mean", "std", "max", "lower", "upper", "width")
-        rows = (
-            [
-                *(c[i] for c in cols),
-                int(stats["n_frames"][i]),
-                *(_fmt_float(stats[k][i]) for k in keys),
-            ] for i in range(len(self.prot_atoms)))
-        return self._write_csv(
-            output, "residue_statistics.csv", [*names, "n_frames", *keys],
-            [rows], "Residue statistics",
-        )
-
-    def _ensure_occupancies(self):
-        """Add an ``occupancies`` topology attribute if the Universe lacks one."""
-        try:
-            self.u.atoms.occupancies  # noqa: B018
-        except (AttributeError, mda.exceptions.NoDataError):
-            self.u.add_TopologyAttr("occupancies")
-
-    @staticmethod
-    def _strip_placeholder_cryst1(path, dims):
-        """Remove the 1 A CRYST1 MDAnalysis writes for a Universe without a box."""
-        if dims is None or np.allclose(np.asarray(dims[:3]), 1.0):
-            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-            path.write_text(
-                "".join(
-                    line for line in lines if not line.startswith("CRYST1")),
-                encoding="utf-8",
-            )
-
-    def write_statistics_pdb(
-            self, frame_index=None, output=None, confidence=0.95,
-            method="percentile"):
-        """
-        b_factors_stats.pdb: trajectory statistics in the B-factor and occupancy
-        columns.
-
-        B-factor: the histogram maximum (mode) of each residue's glycan count
-        over all analyzed frames. Occupancy: the width of the ``confidence``
-        interval (see :meth:`residue_statistics`). Every atom of a residue in
-        ``prot_atoms`` gets that residue's values; all other atoms get 0.
-        Coordinates come from ``frame_index``; the trajectory is restored
-        afterwards. The original tempfactors and occupancies of the Universe
-        are restored as well.
-
-        :param frame_index: Analyzed frame for the coordinates; None means the last.
-        :type frame_index: int or None
-        :param output: Default ``<outdir>/b_factors_stats.pdb``.
-        :type output: str or pathlib.Path or None
-        :param float confidence: See :meth:`residue_statistics`.
-        :param str method: See :meth:`residue_statistics`.
-        :rtype: pathlib.Path
-        """
-        k, _ = self._output_frame(frame_index)
-        stats = self.residue_statistics(confidence, method)
-        output = self._output_path(output, "b_factors_stats.pdb")
-        self._ensure_tempfactors()
-        self._ensure_occupancies()
-
-        for name, values in (("B-factor", stats["mode"]), ("occupancy",
-                                                           stats["width"]),
-                             ):
-            if values.size and values.max() > 999.99:
-                warnings.warn(
-                    f"max {name} value {values.max():g} exceeds the PDB "
-                    "column width (999.99); see residue_statistics.csv",
-                    stacklevel=2,
-                )
-
-        atoms, cols = self._residue_atom_rows()
-        old_bf = self.u.atoms.tempfactors.copy()
-        old_occ = self.u.atoms.occupancies.copy()
-        try:
-            self.u.atoms.tempfactors = np.zeros(self.u.atoms.n_atoms)
-            self.u.atoms.occupancies = np.zeros(self.u.atoms.n_atoms)
-            atoms.tempfactors = stats["mode"][cols]
-            atoms.occupancies = stats["width"][cols]
-        finally:
-            self.u.atoms.tempfactors = old_bf
-            self.u.atoms.occupancies = old_occ
-
-        with self._at_analyzed_frame(k):
-            self.u.atoms.write(str(output))
-            dims = self.u.dimensions
-        self._strip_placeholder_cryst1(output, dims)
-
-        written("Trajectory statistics PDB", output, base=self.outdir)
-        return output
 
     def write_chimerax_script(
             self, structure=None, output=None, palette="white:red",
@@ -1821,134 +1521,11 @@ class GlycoAnalysis(AnalysisBase):
         if self._verbose:
             diagnostic(*parts)
 
-    def _residue_atom_rows(self):
-        """
-        Atoms of the CA residues and the ``all_counts`` column of each.
-
-        Columns follow ``prot_atoms`` order (one CA per residue), so every
-        atom gets the count of its own residue. Atoms are sorted by index.
-
-        :return: ``(atoms, columns)``
-        :rtype: tuple[MDAnalysis.core.groups.AtomGroup, numpy.ndarray]
-        """
-        atoms = self.prot_atoms.residues.atoms
-        cols = self._rows_for(self.prot_atoms.resindices, atoms.resindices)
-        order = np.argsort(atoms.indices, kind="stable")
-        return atoms[order], cols[order]
-
-    @staticmethod
-    def _rows_for(residue_resindices, atom_resindices):
-        """Row (position in ``residue_resindices``) of each atom's residue."""
-        residue_resindices = np.asarray(residue_resindices)
-        order = np.argsort(residue_resindices)
-        pos = np.searchsorted(residue_resindices, atom_resindices, sorter=order)
-        return order[pos]
-
-    @staticmethod
-    def _atom_attr(atom_group, attribute, default=""):
-        """
-        Whole-group attribute as a stripped string array (``default`` if missing).
-
-        :rtype: numpy.ndarray (dtype object)
-        """
-        try:
-            values = getattr(atom_group, attribute)
-        except (AttributeError, mda.exceptions.NoDataError):
-            return np.full(len(atom_group), default, dtype=object)
-        return np.asarray([str(v).strip() for v in values], dtype=object)
-
-    def _identity_columns(self, atom_group, prefix="", atoms=True):
-        """
-        Identity columns in the fixed order chain, resid, resname
-        [, atom_name, atom_serial].
-
-        :param atom_group: Atoms whose identity is written.
-        :param str prefix: Column prefix ('' for the residue itself).
-        :param bool atoms: Include atom name and PDB serial.
-        :return: ``(names, columns)``
-        :rtype: tuple[list[str], list[numpy.ndarray]]
-        """
-        p = f"{prefix}_" if prefix else ""
-        names = [f"{p}chain", f"{p}resid", f"{p}resname"]
-        cols = [
-            self._atom_attr(atom_group, "chainIDs"),
-            _resid_labels(atom_group),
-            self._atom_attr(atom_group, "resnames"),
-        ]
-        if atoms:
-            names += [f"{p}atom_name", f"{p}atom_serial"]
-            cols += [
-                self._atom_attr(atom_group, "names"),
-                pdb_atom_ids(atom_group)
-            ]
-        return names, cols
-
-    def _output_path(self, output, default_name):
-        """
-        Resolve a writer's output path and create its directory.
-
-        :rtype: pathlib.Path
-        """
-        path = Path(output) if output is not None else Path(
-            self.outdir) / default_name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _ensure_tempfactors(self):
-        """Add a ``tempfactors`` topology attribute if the Universe lacks one."""
-        try:
-            self.u.atoms.tempfactors  # noqa: B018
-        except (AttributeError, mda.exceptions.NoDataError):
-            self.u.add_TopologyAttr("tempfactors")
-
     # endregion
 
     # --------------------------------------------------------------
     # region Writers
     # --------------------------------------------------------------
-
-    def _output_frame(self, frame_index):
-        """
-        Resolve the analyzed frame an output is written for.
-
-        :param frame_index: Analyzed-frame index (negative counts from the
-            end); None means the last analyzed frame.
-        :type frame_index: int or None
-        :return: ``(k, trajectory_frame)``
-        :rtype: tuple[int, int]
-        :raises RuntimeError: Before :meth:`run`.
-        """
-        self._require_run()
-        k = self._resolve_frame_index(frame_index)
-        return k, int(self._analyzed_frames()[k])
-
-    def _write_csv(self, output, default_name, header, batches, label):
-        """
-        Write a CSV file with ``header`` and the rows of every batch.
-
-        Batches are written one at a time, so large outputs never have to be
-        held in memory as a whole.
-
-        :param output: Explicit path, or None for ``<outdir>/<default_name>``.
-        :type output: str or pathlib.Path or None
-        :param str default_name: File name inside ``outdir``.
-        :param list header: Column names.
-        :param batches: Iterable of row iterables.
-        :param str label: Name used in the console message.
-        :return: Path of the written file.
-        :rtype: pathlib.Path
-        """
-        output = self._output_path(output, default_name)
-        n = 0
-        with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(header)
-            for batch in batches:
-                batch = list(batch)
-                writer.writerows(batch)
-                n += len(batch)
-        written(label, output, n, base=self.outdir)
-        return output
 
     def write_blockers_csv(
             self, frame_index=None, output=None, chunk=100_000, mode=None,
@@ -1997,45 +1574,6 @@ class GlycoAnalysis(AnalysisBase):
 
         return self._write_csv(
             output, "blockers.csv", header, batches(), "Blockers")
-
-    def write_bfactors(self, frame_index=None, output=None):
-        """
-        Write b_factors.pdb (one frame) and b_factors.npy (all frames) next to it.
-
-        Every atom of a residue in ``prot_atoms`` (all atoms, including
-        hydrogens) gets that residue's glycan count as its B-factor; all other
-        atoms get 0. The trajectory is restored to its previous frame
-        afterwards; the values remain set as ``tempfactors`` on the Universe.
-
-        :param frame_index: Analyzed-frame index; None means the last.
-        :type frame_index: int or None
-        :param output: PDB path; default ``<outdir>/b_factors.pdb``.
-        :type output: str or pathlib.Path or None
-        :rtype: pathlib.Path
-        """
-        k, _ = self._output_frame(frame_index)
-        output = self._output_path(output, "b_factors.pdb")
-        self._ensure_tempfactors()
-
-        values = self.all_counts[k]
-        if values.size and values.max() > 999.99:
-            warnings.warn(
-                f"max B-factor value {values.max():g} exceeds the PDB "
-                "B-factor column width (999.99); use b_factors.npy for "
-                "the raw values", stacklevel=2,
-            )
-        atoms, cols = self._residue_atom_rows()
-        self.u.atoms.tempfactors = np.zeros(self.u.atoms.n_atoms)
-        atoms.tempfactors = values[cols]
-
-        with self._at_analyzed_frame(k):
-            self.u.atoms.write(str(output))
-            dims = self.u.dimensions
-        self._strip_placeholder_cryst1(output, dims)
-
-        np.save(output.with_suffix(".npy"), self.all_counts)
-        written("B-factors", output, base=self.outdir)
-        return output
 
     def write_frame_summary(self, output=None):
         """
@@ -2211,6 +1749,7 @@ class GlycoAnalysis(AnalysisBase):
             },
             "trajectory_frames": self._analyzed_frames().tolist(),
             "versions": _package_versions(),
+            "device": self._device,
         }
         output.write_text(
             json.dumps(config, indent=2, default=str), encoding="utf-8")

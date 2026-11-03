@@ -5,6 +5,8 @@ Subcommands::
 
     glyco run ...          glycan coverage analysis (glycokit.glyco)
     glyco standardize ...  normalise structure inputs (glycokit.standardize)
+    glyco app ...          start the GlyCo web app (glycokit.webapp)
+    glyco sasa ...         per-residue FreeSASA analysis (glycokit.sasa)
 
 Everything after the subcommand is passed unchanged to that module's
 ``main(argv)``, so each subcommand keeps its own options and ``--help``.
@@ -20,11 +22,11 @@ from glycokit.console import error, style
 # subcommand -> (module with main(argv), one-line description)
 COMMANDS = {
     "run": ("glycokit.glyco", "glycan coverage of protein surface residues"),
-    "standardize": (
-        "glycokit.standardize",
-        "normalise structure inputs for glyco / GLYCO",
-    ),
+    "standardize":
+    ("glycokit.standardize", "normalise structure inputs for glyco / GLYCO",
+     ),
     "app": ("glycokit.webapp", "start the GlyCo web app (Streamlit)"),
+    "sasa": ("glycokit.sasa", "per-residue FreeSASA areas as PDB B-factors"),
 }
 
 
@@ -78,7 +80,8 @@ def main(argv=None):
     if not rest and command != "app":
         rest = ["--help"]
 
-    module = importlib.import_module(COMMANDS[command][0])  # lazy: only what is used
+    module = importlib.import_module(
+        COMMANDS[command][0])  # lazy: only what is used
 
     # argparse parsers without an explicit prog name it after sys.argv[0]
     old_argv0 = sys.argv[0]

@@ -1,12 +1,12 @@
-"""Command-line parsers of ``glyco run`` and ``glyco standardize``."""
+"""Command-line parsers of glyco subcommands."""
 
 import argparse
 from pathlib import Path
 
 from glycokit._cli_common import (
-    add_color, add_option, add_shared_option, chain_id, command_line,
-    glyco_parser, name_list, non_negative_float, non_negative_int,
-    positive_float, resname_pair, segid,
+    add_color, add_frame_output, add_frame_slicing, add_option,
+    add_shared_option, chain_id, command_line, glyco_parser, name_list,
+    non_negative_float, non_negative_int, positive_float, resname_pair, segid,
 )
 from glycokit.config import (
     COMPARE_DEFAULTS, COMPARE_ENV_PREFIX, _compare_default,
@@ -208,28 +208,7 @@ def base_parser():
         dest="sasa_hetatm", action="store_true",
     )
 
-    slicing = parser.add_argument_group(
-        "trajectory slicing", "--frames is mutually exclusive with "
-        "--start/--stop/--step; not applicable with "
-        "--indir",
-    )
-    add_option(
-        slicing, ("--frames", ),
-        "explicit list of non-negative frame indices to analyze",
-        dest="frame_list", nargs="+", type=int, default=None, metavar="N",
-    )
-    add_option(
-        slicing, ("--start", ), "first frame index to analyze",
-        dest="frame_start", type=int, default=None, metavar="N",
-    )
-    add_option(
-        slicing, ("--stop", ), "frame index to stop before (exclusive)",
-        dest="frame_stop", type=int, default=None, metavar="N",
-    )
-    add_option(
-        slicing, ("--step", ), "step between analyzed frames",
-        dest="frame_step", type=int, default=None, metavar="N",
-    )
+    add_frame_slicing(parser, "; not applicable with --indir")
 
     output = parser.add_argument_group("output")
     add_option(
@@ -238,18 +217,8 @@ def base_parser():
         "name>, or glyco_<directory name> with --indir (one subfolder per "
         "structure)", dest="outdir", type=str, default=None, metavar="DIR",
     )
-    add_option(
-        output, ("-y", "--force"),
-        "overwrite existing output files without prompting", dest="force",
-        action="store_true",
-    )
-    add_option(
-        output, ("--bfactor-frame", ),
-        "index among the ANALYZED frames (negative counts from the end) used "
-        "for b_factors.pdb, residue_summary.csv and the per-atom CSVs. None: "
-        "the last analyzed frame", dest="bfactor_frame", type=int, default=None,
-        metavar="N",
-    )
+    add_frame_output(
+        output, "b_factors.pdb, residue_summary.csv and the per-atom CSVs")
     add_option(
         output, ("--write-vmd", ),
         "also write a VMD Tcl script that loads the per-residue counts into "
@@ -292,8 +261,8 @@ def base_parser():
     add_shared_option(
         misc, "N_WORKERS",
         "parallel workers; -1 uses all processors. Threads for the KD-tree "
-        "queries (vdw/cylinder), Numba threads for the --mode v1 box test "
-        "(a new pool per analyzed frame)", default=1,
+        "queries (vdw/cylinder), Numba threads for the --mode v1 box test.",
+        default=1,
     )
     add_option(
         misc, ("--device", ),
@@ -632,4 +601,68 @@ def compare_parser():
         run, ("--print-config", ), "print the resolved configuration and exit",
         action="store_true",
     )
+    return parser
+
+
+def sasa_parser():
+    """Command-line parser of ``glyco sasa``."""
+    parser = glyco_parser(
+        "glyco sasa",
+        "Per-residue solvent-accessible surface area (FreeSASA, radii as the "
+        "freesasa executable assigns them) for a structure or every frame of a "
+        "trajectory, written as PDB B-factors and CSV.", "examples:\n"
+        "  glyco sasa -a top.pdb\n"
+        "  glyco sasa -a top.pdb -b traj.xtc -j -1 --bfactor-frame 0\n"
+        "  glyco sasa -a top.pdb --sel 'protein and chain A' --pr 1.2\n",
+    )
+    inputs = parser.add_argument_group("input")
+    add_option(
+        inputs, ("-a", "--top"), "path to topology / structure file",
+        dest="top", type=str, required=True, metavar="PATH")
+    add_option(
+        inputs, ("-b", "--traj"),
+        "path(s) to trajectory file(s); several files use the chain reader",
+        dest="traj", type=str, nargs="+", default=None, metavar="PATH")
+    add_option(
+        inputs, ("--sel", "--selection"),
+        "MDAnalysis selection of the atoms in the SASA calculation "
+        "(hydrogens are removed)", dest="selection", type=str,
+        default="protein", metavar="SELECTION")
+
+    sasa = parser.add_argument_group("FreeSASA")
+    add_shared_option(
+        sasa, "PROBE", "probe radius passed to FreeSASA (in Angstrom)",
+        default=1.4)
+    add_option(
+        sasa, ("--write-atom-areas", ),
+        "also store per-atom areas (sasa_atom_areas.npy)",
+        dest="write_atom_areas", action="store_true")
+
+    add_frame_slicing(parser)
+
+    output = parser.add_argument_group("output")
+    add_option(
+        output, ("-o", "--outdir"),
+        "output directory (created if missing). If omitted: sasa_<topology name>",
+        dest="outdir", type=str, default=None, metavar="DIR")
+    add_frame_output(output, "sasa_bfactors.pdb and residue_sasa.csv")
+    add_option(
+        output, ("--write-stats", ),
+        "also write sasa_histograms.csv, sasa_statistics.csv and "
+        "sasa_bfactors_stats.pdb (B-factor = histogram maximum of the "
+        "residue SASA, occupancy = width of its 95%% interval)",
+        dest="write_stats", action="store_true")
+    add_option(
+        output, ("--stats-bin-width", ),
+        "histogram bin width for --write-stats (in Angstrom^2)",
+        dest="stats_bin_width", type=positive_float, default=5.0,
+        metavar="ANGSTROM^2")
+
+    misc = parser.add_argument_group("misc")
+    add_shared_option(
+        misc, "N_WORKERS",
+        "worker processes for frame-parallel FreeSASA; -1 uses all "
+        "processors", default=1)
+    add_color(misc)
+
     return parser

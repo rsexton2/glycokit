@@ -290,7 +290,7 @@ def set_box_threads(n):
 
     :param int n: Requested threads.
     """
-    numba.set_num_threads(max(1, min(int(n), numba.config.NUMBA_NUM_THREADS)))
+    numba.set_num_threads(max(1, min(int(n), numba.config.NUMBA_NUM_THREADS)))  # pylint: disable=no-member
 
 
 def build_box_grid(B):
@@ -371,7 +371,7 @@ def box_pairs(
     n_blk = np.zeros(n_chunks, np.int64)
     d_sum = np.zeros(n_chunks)
     lim = cutoff + eps
-    for ci in prange(n_chunks):  # one chunk == one legacy worker task
+    for ci in prange(n_chunks):  # pylint: disable=not-an-iterable
         diff = np.empty(3)
         acc = 0.0
         nb = 0
@@ -767,7 +767,7 @@ def planned_outputs(outdir, cfg):
     ]
 
 
-def confirm_overwrite(outdir, cfg):
+def confirm_overwrite(outdir, cfg, names=None):
     """
     Prompt before overwriting existing output files unless ``cfg.force`` is set.
 
@@ -782,10 +782,11 @@ def confirm_overwrite(outdir, cfg):
     """
     if not os.path.isdir(outdir):
         return True
-    existing = [
-        os.path.basename(p) for p in planned_outputs(outdir, cfg)
-        if os.path.exists(p)
-    ]
+    paths = (
+        planned_outputs(outdir, cfg)
+        if names is None else [os.path.join(outdir, n) for n in names])
+    existing = [os.path.basename(p) for p in paths if os.path.exists(p)]
+
     if not existing:
         return True
 
@@ -859,3 +860,14 @@ def resolve_device(requested, mode, fail):
         fail(f"--device gpu: {reason}")
     info(f"--device auto: no usable GPU ({reason}); using the CPU")
     return "cpu"
+
+
+def resolve_workers(n):
+    """-1 -> available CPUs (honours affinity), else n."""
+    n = int(n)
+    if n != -1:
+        return n
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)

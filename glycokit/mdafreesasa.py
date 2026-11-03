@@ -7,6 +7,7 @@ executable assigns them with its default options.
 """
 
 import warnings
+from itertools import repeat
 
 import freesasa
 import MDAnalysis as mda
@@ -15,6 +16,9 @@ from MDAnalysis.analysis.base import AnalysisBase, Results
 from MDAnalysis.analysis.results import ResultsGroup
 from MDAnalysis.guesser.default_guesser import DefaultGuesser
 from MDAnalysis.guesser.tables import vdwradii
+
+from glycokit.residue_output import ResidueOutputMixin
+from glycokit.utils import _fmt_float
 
 freesasa.setVerbosity(1)
 
@@ -74,7 +78,7 @@ def _optional_attr(group, attribute, default):
         return [default] * len(group)
 
 
-class FreesasaAnalysis(AnalysisBase):
+class FreesasaAnalysis(ResidueOutputMixin, AnalysisBase):
     """
     FreeSASA solvent-accessible surface area for every frame of a trajectory.
 
@@ -128,19 +132,28 @@ class FreesasaAnalysis(AnalysisBase):
         """
         return ("serial", "multiprocessing", "dask")
 
-    def __init__(self, ag, probe_radius, keep_atom_areas=False, *, n_threads=1):
+    def __init__(
+            self, ag, probe_radius, keep_atom_areas=False, *, n_threads=1,
+            outdir=None, stats_bin_width=5.0):
         super().__init__(ag.universe.trajectory)
         self.ag = ag
+        self.outdir = outdir
         self.probe_radius = probe_radius
         self.keep_atom_areas = keep_atom_areas
         self.n_threads = max(1, int(n_threads))  # needed by _make_params
         self.params = None
+
+        if not stats_bin_width > 0:  # pylint: disable=unnecessary-negation
+            raise ValueError(
+                f"stats_bin_width must be positive, got {stats_bin_width}")
+        self.stats_bin_width = float(stats_bin_width)
 
         # Populated by _setup_atoms below.
         self._atom_names = None
         self._atom_resnames = None
         self._atom_resnums = None
         self._atom_chains = None
+        self._first_atom = None  # set in _setup_atoms
         self._unique_resindices = None
         self._resindex_inverse = None
         self._residue_keys = None
@@ -175,6 +188,50 @@ class FreesasaAnalysis(AnalysisBase):
         self.__dict__.update(state)
         if hasattr(self, "probe_radius"):
             self.params = self._make_params()
+
+    @property
+    def u(self):
+        """Universe of ``ag`` (needed by ResidueOutputMixin)."""
+        return self.ag.universe
+
+    def _stats_bin_width(self):
+        """SASA is continuous: fixed-width bins in A^2."""
+        return self.stats_bin_width
+
+    # -- hooks for ResidueOutputMixin --------------------------------------
+
+    def _residue_column_atoms(self):
+        """One atom per residue, in residue_areas column order."""
+        return self.ag[self._first_atom]
+
+    def _residue_values(self):
+        return self.results.residue_areas
+
+    # -- CSV writers -------------------------------------------------------
+
+    def write_residue_sasa_csv(self, frame_index=None, output=None):
+        """residue_sasa.csv: SASA (A^2) of every residue in one analyzed frame."""
+        k, tf = self._output_frame(frame_index)
+        names, cols = self._identity_columns(
+            self._residue_column_atoms(), atoms=False)
+        rows = zip(
+            repeat(k), repeat(tf), *(c.tolist() for c in cols),
+            [_fmt_float(a) for a in self.results.residue_areas[k]])
+        return self._write_csv(
+            output, "residue_sasa.csv",
+            ["analyzed_frame", "trajectory_frame", *names, "sasa"], [rows],
+            "Residue SASA")
+
+    def write_frame_sasa_csv(self, output=None):
+        """frame_sasa.csv: total SASA of every analyzed frame."""
+        self._require_run()
+        rows = (
+            [k, int(tf), _fmt_float(a)] for k, (tf, a) in enumerate(
+                zip(self._analyzed_frames(), self.results.total_area)))
+        return self._write_csv(
+            output, "frame_sasa.csv",
+            ["analyzed_frame", "trajectory_frame", "total_sasa"], [rows],
+            "Frame SASA")
 
     # -- setup -------------------------------------------------------------
 
@@ -252,14 +309,13 @@ class FreesasaAnalysis(AnalysisBase):
             _chain_label(c) for c in _optional_attr(atoms, "chainIDs", "")
         ]
 
-        (self._unique_resindices, first_atom,
+        (self._unique_resindices, self._first_atom,
          self._resindex_inverse) = np.unique(
              self.ag.resindices, return_index=True, return_inverse=True)
         self._residue_keys = [
             (
                 self._atom_chains[i].strip(), self._atom_resnums[i],
-                self._atom_resnames[i],
-            ) for i in first_atom
+                self._atom_resnames[i]) for i in self._first_atom
         ]
 
         # radii once; used by the FreeSASA structure and the coordinate path
@@ -466,6 +522,7 @@ class FreesasaAnalysis(AnalysisBase):
 
         :raises ValueError: On an unexpected number of residue or atom areas.
         """
+        residue_areas = None
         if self.structure_valid:
             result = self._compute_freesasa_result()
             residue_areas = self._ordered_residue_areas(result)
@@ -482,6 +539,9 @@ class FreesasaAnalysis(AnalysisBase):
             if not self.structure_valid:
                 residue_areas = self.sum_areas_per_residue(atom_areas)
 
+        if residue_areas is None:
+            raise ValueError(
+                "FreeSASA residue areas were not computed for this frame")
         if len(residue_areas) != len(self._unique_resindices):
             raise ValueError(
                 "Unexpected number of residue areas: "

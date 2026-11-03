@@ -33,9 +33,8 @@ class _HelpOnNoArgsParser(argparse.ArgumentParser):
         return super().parse_args(args, namespace)
 
 
-class _GlycoHelpFormatter(
-    argparse.RawDescriptionHelpFormatter, argparse.ArgumentDefaultsHelpFormatter
-):
+class _GlycoHelpFormatter(argparse.RawDescriptionHelpFormatter,
+                          argparse.ArgumentDefaultsHelpFormatter):
     """Keep description/epilog formatting and append "(default: ...)"."""
 
 
@@ -53,8 +52,7 @@ def chain_id(text):
     text = str(text).strip()
     if len(text) != 1 or not text.isalnum() or not text.isascii():
         raise argparse.ArgumentTypeError(
-            f"must be one character A-Z, a-z or 0-9, got {text!r}"
-        )
+            f"must be one character A-Z, a-z or 0-9, got {text!r}")
     return text
 
 
@@ -62,7 +60,8 @@ def segid(text):
     """argparse type: a PDB segment ID (1-4 characters, columns 73-76)."""
     text = str(text).strip()
     if not 1 <= len(text) <= 4:
-        raise argparse.ArgumentTypeError(f"must be 1-4 characters, got {text!r}")
+        raise argparse.ArgumentTypeError(
+            f"must be 1-4 characters, got {text!r}")
     return text
 
 
@@ -74,8 +73,7 @@ def resname_pair(text):
         raise argparse.ArgumentTypeError(f"expected OLD=NEW, got {text!r}")
     if len(new) > 4:
         raise argparse.ArgumentTypeError(
-            f"new residue name {new!r} is longer than 4 characters"
-        )
+            f"new residue name {new!r} is longer than 4 characters")
     return old, new
 
 
@@ -190,22 +188,50 @@ def add_shared_option(group, key, text, **overrides):
 def add_color(group):
     """Add ``--color`` to ``group``."""
     add_option(
-        group,
-        ("--color",),
+        group, ("--color", ),
         "color terminal output: auto (only on a terminal, and not when "
-        "NO_COLOR is set), always, or never",
-        dest="color",
-        choices=COLOR_CHOICES,
-        default="auto",
+        "NO_COLOR is set), always, or never", dest="color",
+        choices=COLOR_CHOICES, default="auto",
     )
 
 
 def glyco_parser(prog, description, epilog):
     """Parser of a glyco subcommand: shared formatter and help behaviour."""
     return _HelpOnNoArgsParser(
-        prog=prog,
-        description=description,
-        epilog=epilog,
-        formatter_class=_GlycoHelpFormatter,
-        allow_abbrev=False,
+        prog=prog, description=description, epilog=epilog,
+        formatter_class=_GlycoHelpFormatter, allow_abbrev=False,
     )
+
+
+def add_frame_slicing(parser, extra=""):
+    """--frames / --start / --stop / --step (shared by glyco run and glyco sasa)."""
+    slicing = parser.add_argument_group(
+        "trajectory slicing",
+        "--frames is mutually exclusive with --start/--stop/--step" + extra)
+    add_option(
+        slicing, ("--frames", ),
+        "explicit list of non-negative frame indices to analyze",
+        dest="frame_list", nargs="+", type=int, default=None, metavar="N")
+    add_option(
+        slicing, ("--start", ), "first frame index to analyze",
+        dest="frame_start", type=int, default=None, metavar="N")
+    add_option(
+        slicing, ("--stop", ), "frame index to stop before (exclusive)",
+        dest="frame_stop", type=int, default=None, metavar="N")
+    add_option(
+        slicing, ("--step", ), "step between analyzed frames",
+        dest="frame_step", type=int, default=None, metavar="N")
+    return slicing
+
+
+def add_frame_output(group, files):
+    """-y/--force and --bfactor-frame (shared)."""
+    add_option(
+        group, ("-y", "--force"),
+        "overwrite existing output files without prompting", dest="force",
+        action="store_true")
+    add_option(
+        group, ("--bfactor-frame", ),
+        f"index among the ANALYZED frames (negative counts from the end) "
+        f"used for {files}. None: the last analyzed frame",
+        dest="bfactor_frame", type=int, default=None, metavar="N")
