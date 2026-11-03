@@ -17,6 +17,7 @@ dependencies:
   - pytest-xdist
   - codecov
   - freesasa
+  - tqdm
 
   # Pip-only installs
   #- pip:

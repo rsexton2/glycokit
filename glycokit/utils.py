@@ -1,5 +1,6 @@
 import functools
 import glob
+import math
 import os
 import platform
 import sys
@@ -10,21 +11,22 @@ from pathlib import Path
 from types import MappingProxyType
 
 import MDAnalysis as mda
+import numba
 import numpy as np
 import scipy
+from numba import njit, prange
 
 from glycokit.config import (
-    _BLOCKING_TESTS,
-    _BOX_PREFILTER_EPS,
-    _HYDROGEN_NAME,
-    DEFAULT_OUTDIR_NAME,
+    _BLOCKING_TESTS, _BOX_PREFILTER_EPS, _HYDROGEN_NAME, DEFAULT_OUTDIR_NAME,
     OUTPUT_FILES,
 )
 from glycokit.console import error, info, style
 from glycokit.parsers import base_parser
 
-# Per-process state of the GLYCO v1 box workers
+# Per-process state of the reference (pure-Python) GLYCO v1 box test
 _BOX_STATE = {}
+_DEVICES = ("auto", "cpu", "gpu")
+_GPU_MODES = ("default", )
 
 # ============= Helpers =============
 
@@ -46,6 +48,7 @@ def _package_versions():
         "MDAnalysis": mda.__version__,
         "numpy": np.__version__,
         "scipy": scipy.__version__,
+        "numba": numba.__version__,
     }
 
 
@@ -62,7 +65,8 @@ def _resid_labels(ag):
         icodes = [str(i).strip() for i in ag.icodes]
     except (AttributeError, mda.exceptions.NoDataError):
         icodes = [""] * len(resids)
-    return np.asarray([f"{int(r)}{i}" for r, i in zip(resids, icodes)], dtype=object)
+    return np.asarray(
+        [f"{int(r)}{i}" for r, i in zip(resids, icodes)], dtype=object)
 
 
 def _cylinder_blocked(P, G, B, i, g, j, r):
@@ -91,8 +95,7 @@ def _cylinder_blocked(P, G, B, i, g, j, r):
     return (
         (np.einsum("ij,ij->i", q_pt1, vec) > 0)
         & (np.einsum("ij,ij->i", q_pt2, vec) < 0)
-        & (np.linalg.norm(np.cross(q_pt1, vec), axis=1) <= const)
-    )
+        & (np.linalg.norm(np.cross(q_pt1, vec), axis=1) <= const))
 
 
 def _sphere_blocked(P, G, B, i, g, j, R2, exclude_start_overlap=True):
@@ -157,6 +160,10 @@ def _legacy_coords(positions):
     return np.round(np.asarray(positions, dtype=np.float64), 3)
 
 
+# ============= GLYCO v1 box test: reference implementation =============
+# Pure Python, kept as the parity reference for box_pairs (see tests).
+
+
 def _build_x_buckets(positions):
     """
     Reproduce glyco_mod.py's integer-x index (``gen_pro_dict``'s outdict2).
@@ -174,18 +181,11 @@ def _build_x_buckets(positions):
 
 
 def _init_box_worker(
-    start_positions,
-    start_rows,
-    start_residue_keys,
-    gly_positions,
-    blocker_positions,
-    blocker_residue_keys,
-    blocker_x_buckets,
-    cutoff,
-    n_gly,
+    start_positions, start_rows, start_residue_keys, gly_positions,
+    blocker_positions, blocker_residue_keys, blocker_x_buckets, cutoff, n_gly,
 ):
     """
-    Initialize one box-test process with plain NumPy/Python data.
+    Initialize the reference box test with plain NumPy/Python data.
 
     :param numpy.ndarray start_positions: Start coordinates, shape (n, 3).
     :param numpy.ndarray start_rows: Residue row of each start atom.
@@ -204,10 +204,9 @@ def _init_box_worker(
         start_residue_keys=[tuple(k) for k in start_residue_keys],
         gly_positions=np.asarray(gly_positions, dtype=np.float64),
         blocker_positions=np.asarray(blocker_positions, dtype=np.float64),
-        blocker_residue_keys=[tuple(k) for k in blocker_residue_keys],
-        blocker_x_buckets=blocker_x_buckets,
-        cutoff=float(cutoff),
-        n_gly=int(n_gly),
+        blocker_residue_keys=[tuple(k) for k in blocker_residue_keys
+                              ], blocker_x_buckets=blocker_x_buckets,
+        cutoff=float(cutoff), n_gly=int(n_gly),
     )
 
 
@@ -221,8 +220,10 @@ def _box_chunk(start_range):
     :rtype: tuple[numpy.ndarray, numpy.ndarray, int, float]
     """
     s = _BOX_STATE
-    P, rows, skeys = s["start_positions"], s["start_rows"], s["start_residue_keys"]
-    G, B, bkeys = s["gly_positions"], s["blocker_positions"], s["blocker_residue_keys"]
+    P, rows, skeys = s["start_positions"], s["start_rows"], s[
+        "start_residue_keys"]
+    G, B, bkeys = s["gly_positions"], s["blocker_positions"], s[
+        "blocker_residue_keys"]
     buckets, cutoff, n_gly = s["blocker_x_buckets"], s["cutoff"], s["n_gly"]
 
     lo, hi = start_range
@@ -254,16 +255,11 @@ def _box_chunk(start_range):
             for t in np.arange(0.0, 1.0, 1.0 / distance):
                 point = p + t * difference
                 x, y, z = int(point[0]), int(point[1]), int(point[2])
-                for bi in chain(
-                    buckets.get(x, ()), buckets.get(x - 1, ()), buckets.get(x + 1, ())
-                ):
+                for bi in chain(buckets.get(x, ()), buckets.get(x - 1, ()),
+                                buckets.get(x + 1, ())):
                     bx, by, bz = B[bi]
-                    if (
-                        abs(y - by) <= 1.0
-                        and abs(z - bz) <= 1.0
-                        and abs(x - bx) <= 1.0
-                        and bkeys[bi] != own
-                    ):
+                    if (abs(y - by) <= 1.0 and abs(z - bz) <= 1.0
+                            and abs(x - bx) <= 1.0 and bkeys[bi] != own):
                         blocked = True
                         break
                 if blocked:
@@ -277,10 +273,136 @@ def _box_chunk(start_range):
 
     return (
         np.asarray(sorted(candidate_keys), dtype=np.int64),
-        np.asarray(sorted(visible_keys), dtype=np.int64),
-        n_blocked,
-        blocked_distance_sum,
+        np.asarray(sorted(visible_keys),
+                   dtype=np.int64), n_blocked, blocked_distance_sum,
     )
+
+
+# ============= GLYCO v1 box test: Numba implementation =============
+
+
+def set_box_threads(n):
+    """
+    Set the Numba thread count for :func:`box_pairs`.
+
+    Clamped to ``[1, NUMBA_NUM_THREADS]``: :func:`numba.set_num_threads`
+    raises ``ValueError`` above the launched pool size.
+
+    :param int n: Requested threads.
+    """
+    numba.set_num_threads(max(1, min(int(n), numba.config.NUMBA_NUM_THREADS)))
+
+
+def build_box_grid(B):
+    """
+    Dense cell list of blockers keyed ``(int(bx), floor(by), floor(bz))``.
+
+    x is truncated toward zero like the legacy ``int()`` buckets; y and z
+    use floor. The 3x3x3 scan in :func:`_box_blocked` therefore finds a
+    superset of the legacy candidates, and the exact test decides.
+
+    :param numpy.ndarray B: Blocker coordinates, shape (k, 3).
+    :return: ``(lo, dims, order, cell_start, cell_end)``
+    :rtype: tuple[numpy.ndarray, ...]
+    """
+    if len(B) == 0:
+        z = np.zeros(3, np.int64)
+        e = np.empty(0, np.int64)
+        return z, z, e, e, e
+    ix = B[:, 0].astype(np.int64)  # trunc, like int()
+    iy = np.floor(B[:, 1]).astype(np.int64)
+    iz = np.floor(B[:, 2]).astype(np.int64)
+    lo = np.array([ix.min(), iy.min(), iz.min()], np.int64)
+    dims = np.array([ix.max(), iy.max(), iz.max()], np.int64) - lo + 1
+    cid = ((ix - lo[0]) * dims[1] + (iy - lo[1])) * dims[2] + (iz - lo[2])
+    order = np.argsort(cid, kind="stable")
+    cells = np.arange(int(dims.prod()), dtype=np.int64)
+    cs = np.searchsorted(cid[order], cells, "left")
+    ce = np.searchsorted(cid[order], cells, "right")
+    return lo, dims, order, cs, ce
+
+
+@njit(cache=True)
+def _box_blocked(p, diff, dist, own, B, b_id, lo, dims, order, cs, ce):
+    """Exact GLYCO v1 box test for one (start, glycan) pair."""
+    step = 1.0 / dist
+    n = int(math.ceil(1.0 / step))  # == len(np.arange(0.0, 1.0, step))
+    for k in range(n):
+        t = k * step  # arange fills start + k*delta
+        x = int(p[0] + t * diff[0])  # int() truncates toward zero
+        y = int(p[1] + t * diff[1])
+        z = int(p[2] + t * diff[2])
+        for cx in range(x - 1, x + 2):
+            gx = cx - lo[0]
+            if gx < 0 or gx >= dims[0]:
+                continue
+            for cy in range(y - 1, y + 2):
+                gy = cy - lo[1]
+                if gy < 0 or gy >= dims[1]:
+                    continue
+                for cz in range(z - 1, z + 2):
+                    gz = cz - lo[2]
+                    if gz < 0 or gz >= dims[2]:
+                        continue
+                    c = (gx * dims[1] + gy) * dims[2] + gz
+                    for s in range(cs[c], ce[c]):
+                        bi = order[s]
+                        if (abs(y - B[bi, 1]) <= 1.0
+                                and abs(z - B[bi, 2]) <= 1.0
+                                and abs(x - B[bi, 0]) <= 1.0
+                                and b_id[bi] != own):
+                            return True
+    return False
+
+
+@njit(parallel=True, cache=True)
+def box_pairs(
+        P, own_id, G, B, b_id, lo, dims, order, cs, ce, cutoff, eps, per_task):
+    """
+    GLYCO v1 box test for every (start, glycan) pair, parallel over chunks.
+
+    :return: ``(status, n_blocked_per_chunk, dist_sum_per_chunk)``; status
+        is 0 (outside cutoff), 1 (visible) or 2 (blocked), shape
+        (n_starts, n_glycan).
+    """
+    n_s, n_g = P.shape[0], G.shape[0]
+    n_chunks = (n_s + per_task - 1) // per_task
+    status = np.zeros((n_s, n_g), np.int8)
+    n_blk = np.zeros(n_chunks, np.int64)
+    d_sum = np.zeros(n_chunks)
+    lim = cutoff + eps
+    for ci in prange(n_chunks):  # one chunk == one legacy worker task
+        diff = np.empty(3)
+        acc = 0.0
+        nb = 0
+        for si in range(ci * per_task, min((ci + 1) * per_task, n_s)):
+            p = P[si]
+            own = own_id[si]
+            for gi in range(n_g):
+                a = G[gi, 0] - p[0]
+                b = G[gi, 1] - p[1]
+                c = G[gi, 2] - p[2]
+                if not (math.sqrt(a * a + b * b + c * c) < lim):
+                    continue  # conservative prefilter
+                diff[0] = a
+                diff[1] = b
+                diff[2] = c
+                d = math.sqrt(np.dot(diff, diff))  # must match np.linalg.norm
+                if d >= cutoff:  # GLYCO: distance < cutoff
+                    continue
+                if d == 0.0 or not _box_blocked(p, diff, d, own, B, b_id, lo,
+                                                dims, order, cs, ce):
+                    status[si, gi] = 1
+                else:
+                    status[si, gi] = 2
+                    nb += 1
+                    acc += d
+        n_blk[ci] = nb
+        d_sum[ci] = acc
+    return status, n_blk, d_sum
+
+
+# ============= Atom helpers =============
 
 
 def pdb_atom_ids(atom_group):
@@ -312,11 +434,12 @@ def heavy_atoms(ag, legacy=False):
     """
     names = np.asarray(ag.names, dtype=str)
     if legacy:
-        is_h = np.fromiter(("H" in n for n in names), dtype=bool, count=len(names))
+        is_h = np.fromiter(
+            ("H" in n for n in names), dtype=bool, count=len(names))
         return ag[~is_h]
     is_h = np.fromiter(
-        (bool(_HYDROGEN_NAME.match(n)) for n in names), dtype=bool, count=len(names)
-    )
+        (bool(_HYDROGEN_NAME.match(n)) for n in names), dtype=bool,
+        count=len(names))
     try:
         elements = np.char.upper(np.asarray(ag.elements, dtype=str))
         is_h |= np.isin(elements, ("H", "D"))
@@ -337,6 +460,9 @@ def find_structures(indir, extensions):
     for ext in extensions:
         files.extend(sorted(glob.glob(os.path.join(indir, f"*.{ext}"))))
     return list(dict.fromkeys(files))
+
+
+# ============= Argument validation =============
 
 
 @functools.lru_cache(maxsize=1)
@@ -363,12 +489,9 @@ def _warn_ignored_options(cfg, blocking):
     ignored = []
     if blocking != "vdw":
         ignored += [
-            flag
-            for name, flag in (
-                ("vdw_scale", "--vdw-scale"),
-                ("vdw_probe", "--vdw-probe"),
-            )
-            if changed(name)
+            flag for name, flag in (
+                ("vdw_scale", "--vdw-scale"), ("vdw_probe", "--vdw-probe"),
+            ) if changed(name)
         ]
     if blocking != "cylinder" and changed("cylinder_radius"):
         ignored.append("--cr")
@@ -377,25 +500,20 @@ def _warn_ignored_options(cfg, blocking):
     if ignored:
         warnings.warn(
             f"{', '.join(ignored)}: no effect with --mode {cfg.mode} "
-            f"--blocking {blocking}",
-            stacklevel=3,
+            f"--blocking {blocking}", stacklevel=3,
         )
 
     if getattr(cfg, "skip_sasa", False):
         unused = [
-            flag
-            for name, flag in (
-                ("area_cutoff", "--ac"),
-                ("sasa_probe", "--pr"),
-                ("sasa_env", "--sasa-env"),
-                ("sasa_hetatm", "--sasa-hetatm"),
-            )
-            if changed(name)
+            flag for name, flag in (
+                ("area_cutoff", "--ac"), ("sasa_probe", "--pr"),
+                ("sasa_env", "--sasa-env"), ("sasa_hetatm", "--sasa-hetatm"),
+            ) if changed(name)
         ]
         if unused:
             warnings.warn(
-                f"{', '.join(unused)}: no effect with --skip-sasa", stacklevel=3
-            )
+                f"{', '.join(unused)}: no effect with --skip-sasa",
+                stacklevel=3)
         if cfg.mode != "default":
             warnings.warn(
                 f"--skip-sasa with --mode {cfg.mode}: surface residues differ "
@@ -434,10 +552,14 @@ def _validate_inputs(cfg, fail):
 
     if not os.path.isdir(cfg.indir):
         fail(f"--indir: no such directory: {cfg.indir!r}")
-    extensions = [e.strip().lstrip(".") for e in cfg.in_types.split(",") if e.strip()]
+    extensions = [
+        e.strip().lstrip(".") for e in cfg.in_types.split(",") if e.strip()
+    ]
     structures = find_structures(cfg.indir, extensions)
     if not structures:
-        fail(f"--indir: no files with extension(s) {extensions} found in {cfg.indir!r}")
+        fail(
+            f"--indir: no files with extension(s) {extensions} found in {cfg.indir!r}"
+        )
     cfg.structures = structures
 
 
@@ -454,23 +576,25 @@ def _validate_mode(cfg, fail, warn=True):
     :rtype: str
     """
     if cfg.mode not in _BLOCKING_TESTS:
-        fail(f"--mode must be one of {sorted(_BLOCKING_TESTS)}, got {cfg.mode!r}")
+        fail(
+            f"--mode must be one of {sorted(_BLOCKING_TESTS)}, got {cfg.mode!r}"
+        )
     allowed = _BLOCKING_TESTS[cfg.mode]
     if cfg.blocking is not None and cfg.blocking not in allowed:
         fail(
             f"--blocking {cfg.blocking} is not available with --mode {cfg.mode} "
-            f"(allowed: {', '.join(allowed)})"
-        )
+            f"(allowed: {', '.join(allowed)})")
     blocking = cfg.blocking or allowed[0]
     if blocking == "box" and cfg.write_blockers:
         fail(
             "--write-blockers is not supported with --mode v1 (the box test "
-            "does not identify blocking atoms); --write-excluded is supported"
-        )
+            "does not identify blocking atoms); --write-excluded is supported")
 
     if cfg.mode != "default" and warn:
         files = [cfg.top] if cfg.top is not None else list(cfg.structures)
-        non_pdb = [f for f in files if Path(f).suffix.lower() not in (".pdb", ".ent")]
+        non_pdb = [
+            f for f in files if Path(f).suffix.lower() not in (".pdb", ".ent")
+        ]
         if non_pdb:
             warnings.warn(
                 f"--mode {cfg.mode} needs PDB record types; may fail for {non_pdb[:3]}",
@@ -504,8 +628,7 @@ def _validate_frames(cfg, fail):
     if cfg.indir is not None and (frames_given or slice_given):
         fail(
             "--frames/--start/--stop/--step are not meaningful with --indir "
-            "(each structure is a single, independent frame)"
-        )
+            "(each structure is a single, independent frame)")
     if step is not None and step == 0:
         fail("--step cannot be 0")
     if _empty_forward_slice(start, stop, step):
@@ -600,11 +723,15 @@ def validate_arguments(cfg, fail, check_inputs=True, warn=True):
     blocking = _validate_mode(cfg, fail, warn)
     _validate_frames(cfg, fail)
     _validate_numbers(cfg, fail)
+    _validate_device(cfg, fail)
 
     if warn:
         _warn_ignored_options(cfg, blocking)
     if not cfg.outdir:
         cfg.outdir = default_outdir(cfg)
+
+
+# ============= Output directory handling =============
 
 
 def _ask_yes_no(question):
@@ -635,8 +762,7 @@ def default_outdir(cfg):
 def planned_outputs(outdir, cfg):
     """Paths of the files a run with parameters ``cfg`` writes into ``outdir``."""
     return [
-        os.path.join(outdir, name)
-        for name, flag in OUTPUT_FILES.items()
+        os.path.join(outdir, name) for name, flag in OUTPUT_FILES.items()
         if flag is None or getattr(cfg, flag)
     ]
 
@@ -657,22 +783,25 @@ def confirm_overwrite(outdir, cfg):
     if not os.path.isdir(outdir):
         return True
     existing = [
-        os.path.basename(p) for p in planned_outputs(outdir, cfg) if os.path.exists(p)
+        os.path.basename(p) for p in planned_outputs(outdir, cfg)
+        if os.path.exists(p)
     ]
     if not existing:
         return True
 
     listing = ", ".join(existing)
     if cfg.force:
-        info(f"overwriting in {style(outdir, 'cyan')}: {listing} (--force given)")
+        info(
+            f"overwriting in {style(outdir, 'cyan')}: {listing} (--force given)"
+        )
         return True
     if not sys.stdin.isatty():
         error(
             f"{outdir!r} already contains: {listing}; no TTY is available to "
-            "prompt, pass --force to overwrite non-interactively"
-        )
+            "prompt, pass --force to overwrite non-interactively")
         return False
-    return _ask_yes_no(f"{outdir!r} already contains: {listing}. Overwrite? [y/N] ")
+    return _ask_yes_no(
+        f"{outdir!r} already contains: {listing}. Overwrite? [y/N] ")
 
 
 def load_universe(top, traj=None):
@@ -684,3 +813,49 @@ def load_universe(top, traj=None):
     if not traj:
         return mda.Universe(top)
     return mda.Universe(top, traj if len(traj) > 1 else traj[0])
+
+
+def _validate_device(cfg, fail):
+    """Validate --device (no CUDA import here)."""
+    device = getattr(cfg, "device", "auto")
+    if device not in _DEVICES:
+        fail(f"--device must be one of {_DEVICES}, got {device!r}")
+    if device == "gpu" and cfg.mode not in _GPU_MODES:
+        fail(
+            f"--device gpu is only supported with --mode default "
+            f"(got --mode {cfg.mode})")
+
+
+def gpu_status():
+    """``(usable, reason)``; imports the optional GPU module lazily."""
+    try:
+        # pylint: disable-next=import-outside-toplevel
+        from glycokit import _gpu
+    except ImportError as exc:
+        return False, str(exc)
+    if not _gpu.is_available():
+        return False, "no CUDA device found"
+    return True, ""
+
+
+def resolve_device(requested, mode, fail):
+    """
+    Backend for the blocking test: ``'cpu'`` or ``'gpu'``.
+
+    :param str requested: ``'auto'``, ``'cpu'`` or ``'gpu'``.
+    :param str mode: Resolved counting mode.
+    :param callable fail: Called with a message if ``'gpu'`` cannot be used.
+    """
+    if requested == "cpu" or mode not in _GPU_MODES:
+        if requested == "gpu":
+            fail(
+                f"--device gpu is only supported with --mode default (got {mode})"
+            )
+        return "cpu"
+    ok, reason = gpu_status()
+    if ok:
+        return "gpu"
+    if requested == "gpu":
+        fail(f"--device gpu: {reason}")
+    info(f"--device auto: no usable GPU ({reason}); using the CPU")
+    return "cpu"

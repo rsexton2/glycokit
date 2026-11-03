@@ -9,7 +9,11 @@ VMD_SCRIPT_NAME = "load_user_attributes.vmd"
 DEFAULT_OUTDIR_NAME = "glyco_output"
 
 # Blocking tests allowed per counting mode; the first one is the default.
-_BLOCKING_TESTS = {"default": ("vdw", "cylinder"), "v1": ("box",), "v2": ("cylinder",)}
+_BLOCKING_TESTS = {
+    "default": ("vdw", "cylinder"),
+    "v1": ("box", ),
+    "v2": ("cylinder", )
+}
 
 COMPARE_ENV_PREFIX = "GLYCO_COMPARE_"
 
@@ -20,8 +24,7 @@ _HYDROGEN_NAME = re.compile(r"^\d*H")
 # Protein residue names accepted by the original scripts
 _V1_RESNAMES = (
     "ALA ARG ASN ASP CYS GLN GLU GLY HSD HIS HIE HID "
-    "ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL"
-)
+    "ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL")
 _V2_RESNAMES = _V1_RESNAMES + " HSE HSP"
 
 # Safety margin of the vectorized distance prefilter in _box_chunk. The exact
@@ -70,17 +73,13 @@ COMPARE_DEFAULTS = {
     "GLYCO_COMMAND": "glyco run",  # split like a shell command line
 }
 
-
 # Errors MDAnalysis raises for an invalid or unsupported selection string:
 # SelectionError for parse errors / unknown keywords, NoDataError (a subclass
 # of ValueError and AttributeError) for missing topology attributes such as
 # record_type on non-PDB topologies.
 _SELECTION_ERRORS = (
-    mda.exceptions.SelectionError,
-    mda.exceptions.NoDataError,
-    ValueError,
-    TypeError,
-    AttributeError,
+    mda.exceptions.SelectionError, mda.exceptions.NoDataError, ValueError,
+    TypeError, AttributeError,
 )
 
 # Errors from building a Universe: missing/unreadable files, unknown formats,
@@ -91,12 +90,7 @@ _LOAD_ERRORS = (OSError, ValueError, TypeError, IndexError, KeyError, EOFError)
 # batch. GlycoAnalysis reports input problems as ValueError, TypeError,
 # IndexError, RuntimeError or FileNotFoundError (an OSError).
 _JOB_ERRORS = (
-    OSError,
-    ValueError,
-    TypeError,
-    IndexError,
-    KeyError,
-    RuntimeError,
+    OSError, ValueError, TypeError, IndexError, KeyError, RuntimeError,
     mda.exceptions.SelectionError,
 )
 

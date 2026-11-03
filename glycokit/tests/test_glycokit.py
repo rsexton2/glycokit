@@ -29,12 +29,8 @@ from glycokit.tests.sasa_probe import capture
 from glycokit.utils import _parser_defaults
 
 EXPECTED_FILES = (
-    "b_factors.pdb",
-    "b_factors.npy",
-    "frame_summary.csv",
-    "residue_summary.csv",
-    "excluded_glycan_atoms.csv",
-    "run_config.json",
+    "b_factors.pdb", "b_factors.npy", "frame_summary.csv",
+    "residue_summary.csv", "excluded_glycan_atoms.csv", "run_config.json",
 )
 EXCLUSION_REASONS = {"outside_distance_cutoff", "blocked_for_all_start_atoms"}
 COMPARED_CSVS = ("residue_summary.csv", "excluded_glycan_atoms.csv")
@@ -42,7 +38,6 @@ COMPARED_CSVS = ("residue_summary.csv", "excluded_glycan_atoms.csv")
 # blocking test each mode resolves to when --blocking is not given
 RESOLVED_BLOCKING = {"default": "vdw", "v1": "box", "v2": "cylinder"}
 BLOCKER_MODES = ("default", "default-cylinder", "v2")
-
 
 # --------------------------------------------------------------------------
 # helpers: constant-memory file comparison
@@ -57,15 +52,13 @@ def file_digest(path, algorithm="sha256"):
 
 def _first_difference(a, b, width=200):
     """(line number, line in a, line in b) of the first difference, streamed."""
-    with (
-        open(a, newline="", encoding="utf-8") as fa,
-        open(b, newline="", encoding="utf-8") as fb,
-    ):
+    with (open(a, newline="", encoding="utf-8") as
+          fa, open(b, newline="", encoding="utf-8") as fb,
+          ):
         for n, (la, lb) in enumerate(itertools.zip_longest(fa, fb), 1):
             if la != lb:
                 return (
-                    n,
-                    (la or "<EOF>")[:width].rstrip("\n"),
+                    n, (la or "<EOF>")[:width].rstrip("\n"),
                     (lb or "<EOF>")[:width].rstrip("\n"),
                 )
     return None
@@ -77,18 +70,16 @@ def assert_same_file(a, b, label=None):
     label = label or a.name
     for p in (a, b):
         assert p.is_file(), f"{label}: missing {p}"
-    if a.stat().st_size == b.stat().st_size and file_digest(a) == file_digest(b):
+    if a.stat().st_size == b.stat().st_size and file_digest(a) == file_digest(
+            b):
         return
     diff = _first_difference(a, b)
     where = (
         f"first difference at line {diff[0]}:\n  {a}: {diff[1]}\n  {b}: {diff[2]}"
-        if diff
-        else "files differ only in line endings"
-    )
+        if diff else "files differ only in line endings")
     pytest.fail(
         f"{label}: files differ ({a.stat().st_size} vs {b.stat().st_size} "
-        f"bytes); {where}",
-        pytrace=False,
+        f"bytes); {where}", pytrace=False,
     )
 
 
@@ -134,8 +125,7 @@ def unique_ca_keys(analysis):
     if len(set(keys)) != len(keys):
         pytest.skip(
             "(chain, resid, resname) is not unique for this structure; "
-            "CSV rows cannot be matched to residues"
-        )
+            "CSV rows cannot be matched to residues")
     return keys
 
 
@@ -157,16 +147,9 @@ def _last_analyzed(run):
 def _assert_positive_radii(calls, label):
     bad = [
         (
-            c["caller"][0],
-            a.get("chain"),
-            a.get("resnum"),
-            a.get("resname"),
-            a.get("name"),
-            a["radius"],
-        )
-        for c in calls
-        for a in c["atoms"]
-        if not a["radius"] > 0
+            c["caller"][0], a.get("chain"), a.get("resnum"), a.get("resname"),
+            a.get("name"), a["radius"],
+        ) for c in calls for a in c["atoms"] if not a["radius"] > 0
     ]
     assert not bad, f"{label}: zero/invalid radius passed to FreeSASA: {bad[:10]}"
 
@@ -174,7 +157,8 @@ def _assert_positive_radii(calls, label):
 def _mode_cli_args(mode):
     """glyco CLI flags of a test mode."""
     glyco_mode, blocking = MODE_SPECS[mode]
-    return ["--mode", glyco_mode] + (["--blocking", blocking] if blocking else [])
+    return ["--mode", glyco_mode
+            ] + (["--blocking", blocking] if blocking else [])
 
 
 # --------------------------------------------------------------------------
@@ -224,7 +208,8 @@ def test_histograms_before_run_raise(glyco, glyco_params, first_case):
 def test_invalid_selection_reports_value_error(glyco, glyco_params, first_case):
     """An invalid selection is reported as ValueError, not an MDAnalysis error."""
     with pytest.raises(ValueError, match="invalid atom selection"):
-        _make_analysis(glyco, glyco_params, first_case, gly_sel="nosuchkeyword FOO")
+        _make_analysis(
+            glyco, glyco_params, first_case, gly_sel="nosuchkeyword FOO")
 
 
 def test_v1_without_record_types_warns(glyco, glyco_params, first_case):
@@ -256,20 +241,14 @@ def test_bad_trajectory_load_is_value_error(glyco, first_case, tmp_path):
 
 
 def test_bad_trajectory_load_cli_exit(
-    glyco, glyco_cli_args, first_case, tmp_path, capsys
-):
+        glyco, glyco_cli_args, first_case, tmp_path, capsys):
     """Through main(), an unreadable trajectory is a usage error (exit 2)."""
     bad = tmp_path / "bad.xtc"
     bad.write_bytes(b"not a trajectory")
     argv = [
-        "-a",
-        first_case.top,
-        "-b",
-        str(bad),
-        *glyco_cli_args(first_case),
-        "-o",
-        str(tmp_path / "out"),
-        "--force",
+        "-a", first_case.top, "-b",
+        str(bad), *glyco_cli_args(first_case), "-o",
+        str(tmp_path / "out"), "--force",
     ]
     try:
         with pytest.raises(SystemExit) as exc_info:
@@ -291,7 +270,8 @@ def test_outputs(case, mode, runner):
     missing = [f for f in EXPECTED_FILES if not (r.outdir / f).is_file()]
     assert not missing, f"missing output files: {missing}"
 
-    config = json.loads((r.outdir / "run_config.json").read_text(encoding="utf-8"))
+    config = json.loads(
+        (r.outdir / "run_config.json").read_text(encoding="utf-8"))
     glyco_mode, blocking = MODE_SPECS[mode]
     assert config["mode"] == glyco_mode
     assert config["blocking"] == (blocking or RESOLVED_BLOCKING[glyco_mode])
@@ -340,8 +320,7 @@ def test_frame_summary(case, mode, runner):
 def test_bfactors_npy(case, mode, runner):
     r = runner(case, mode)
     np.testing.assert_array_equal(
-        np.load(r.outdir / "b_factors.npy"), r.analysis.all_counts, strict=True
-    )
+        np.load(r.outdir / "b_factors.npy"), r.analysis.all_counts, strict=True)
 
 
 def test_residue_summary_matches_counts(case, mode, runner):
@@ -373,7 +352,10 @@ def test_excluded_atoms_consistent(case, mode, runner, glyco):
     a = r.analysis
     keys = unique_ca_keys(a)
     n_gly = len(a.gly_atoms)
-    count_of = {(c, rid): int(n) for (c, rid, _), n in zip(keys, _last_counts(a))}
+    count_of = {
+        (c, rid): int(n)
+        for (c, rid, _), n in zip(keys, _last_counts(a))
+    }
     serials = {str(s) for s in glyco.pdb_atom_ids(a.gly_atoms)}
 
     per_residue, seen_in_residue = Counter(), {}
@@ -401,15 +383,13 @@ def test_case_selections(case, case_settings, glyco):
     glycans = u.select_atoms(s["gs"])
     assert len(glycans), f"{case.id}: gs {s['gs']!r} selects no atoms"
     assert len(u.select_atoms(f"({s['ps']}) and name CA")), (
-        f"{case.id}: ps {s['ps']!r} selects no CA atoms"
-    )
+        f"{case.id}: ps {s['ps']!r} selects no CA atoms")
     legacy = s["legacy_glycans"]
     if not legacy:
         pytest.skip("no legacy glycan names for this structure")
     too_long = [n for n in legacy if len(n) > 4]
     assert not too_long, (
-        f"{case.id}: legacy tools read 4-character residue names: {too_long}"
-    )
+        f"{case.id}: legacy tools read 4-character residue names: {too_long}")
     legacy_atoms = u.select_atoms("resname " + " ".join(legacy))
     assert set(legacy_atoms.indices) == set(glycans.indices), (
         f"{case.id}: gs {s['gs']!r} selects {len(glycans)} atoms "
@@ -419,8 +399,7 @@ def test_case_selections(case, case_settings, glyco):
 
 
 def test_cli_matches_library(
-    case, mode, runner, glyco, glyco_cli_args, pytestconfig, tmp_path
-):
+        case, mode, runner, glyco, glyco_cli_args, pytestconfig, tmp_path):
     """The CLI writes the same results as the library; FreeSASA gets valid radii."""
     r = runner(case, mode)  # cached library run
 
@@ -429,13 +408,8 @@ def test_cli_matches_library(
     if case.traj:
         argv += ["-b", *case.traj]
     argv += [
-        *glyco_cli_args(case),
-        *_mode_cli_args(mode),
-        "-o",
-        str(cli_dir),
-        "--force",
-        "--write-excluded",
-        "-j",
+        *glyco_cli_args(case), *_mode_cli_args(mode), "-o",
+        str(cli_dir), "--force", "--write-excluded", "-j",
         str(pytestconfig.glyco_n_workers),
     ]
     if r.frames is not None:
@@ -448,10 +422,10 @@ def test_cli_matches_library(
 
     _assert_positive_radii(probe["calls"], "CLI")
     for name in (*COMPARED_CSVS, "frame_summary.csv"):
-        assert_same_file(r.outdir / name, cli_dir / name, f"CLI vs library: {name}")
+        assert_same_file(
+            r.outdir / name, cli_dir / name, f"CLI vs library: {name}")
     np.testing.assert_array_equal(
-        np.load(cli_dir / "b_factors.npy"), r.analysis.all_counts, strict=True
-    )
+        np.load(cli_dir / "b_factors.npy"), r.analysis.all_counts, strict=True)
 
 
 def test_bfactors_pdb_per_residue(case, mode, runner, glyco):
@@ -460,13 +434,13 @@ def test_bfactors_pdb_per_residue(case, mode, runner, glyco):
     a = r.analysis
     u = glyco.mda.Universe(str(r.outdir / "b_factors.pdb"))
     k = -1 if a.bfactor_frame is None else a.bfactor_frame
-    expected = dict(zip(a.prot_atoms.resindices.tolist(), a.all_counts[k].tolist()))
+    expected = dict(
+        zip(a.prot_atoms.resindices.tolist(), a.all_counts[k].tolist()))
     for res in u.residues:
         values = set(res.atoms.tempfactors.round(2).tolist())
         assert len(values) == 1, f"{res}: several B-factors {sorted(values)}"
-        assert values.pop() == pytest.approx(expected.get(res.resindex, 0), abs=0.01), (
-            res
-        )
+        assert values.pop() == pytest.approx(
+            expected.get(res.resindex, 0), abs=0.01), (res)
 
 
 @pytest.mark.slow
@@ -475,12 +449,12 @@ def test_n_workers_serial_equals_parallel(case, mode, runner, pytestconfig):
     n = pytestconfig.glyco_n_workers
     n = 2 if n == 1 else n
     serial = runner(case, mode, n_workers=1)
-    parallel = runner(case, mode, n_workers=n)  # cached if n is the session value
+    parallel = runner(
+        case, mode, n_workers=n)  # cached if n is the session value
     for name in ("glycan_counts", "n_blocked_pairs", "mean_blocked_distance"):
         np.testing.assert_array_equal(
             getattr(serial.analysis.results, name),
-            getattr(parallel.analysis.results, name),
-            err_msg=name,
+            getattr(parallel.analysis.results, name), err_msg=name,
         )
     assert_same_file(
         serial.outdir / "excluded_glycan_atoms.csv",
@@ -507,11 +481,9 @@ def test_frame_slicing_consistent(case, mode, runner):
     k, frame = _last_analyzed(full)
     single = runner(case, mode, frames=[frame])
     np.testing.assert_array_equal(
-        single.analysis.all_counts[0], full.analysis.all_counts[k]
-    )
+        single.analysis.all_counts[0], full.analysis.all_counts[k])
     np.testing.assert_allclose(
-        single.analysis.residue_areas[0], full.analysis.residue_areas[k]
-    )
+        single.analysis.residue_areas[0], full.analysis.residue_areas[k])
 
 
 @pytest.mark.glyco_kind("trajectory")
@@ -523,15 +495,13 @@ def test_trajectory_frame_equals_single_structure(case, mode, runner, glyco):
     ts = u.trajectory[frame]
     extra = {} if ts.dimensions is None else {"dimensions": ts.dimensions}
     u1 = glyco.mda.Universe(
-        case.top, u.atoms.positions.copy()[None], format=MemoryReader, **extra
-    )
+        case.top,
+        u.atoms.positions.copy()[None], format=MemoryReader, **extra)
     single = runner(case, mode, frames=None, universe=u1)
     np.testing.assert_array_equal(
-        single.analysis.all_counts[0], full.analysis.all_counts[k]
-    )
+        single.analysis.all_counts[0], full.analysis.all_counts[k])
     np.testing.assert_allclose(
-        single.analysis.residue_areas[0], full.analysis.residue_areas[k]
-    )
+        single.analysis.residue_areas[0], full.analysis.residue_areas[k])
 
 
 @pytest.mark.glyco_kind("trajectory")
@@ -559,17 +529,15 @@ def test_get_blockers_ignores_trajectory_position(case, mode, runner):
     finally:
         traj[old]  # pylint: disable=pointless-statement  # runner results are shared
 
-    for label, (blockers, dists) in (
-        ("cached path", cached),
-        ("explicit start_idx", explicit),
-    ):
+    for label, (blockers, dists) in (("cached path", cached),
+                                     ("explicit start_idx", explicit),
+                                     ):
         np.testing.assert_array_equal(blockers, expected[0], err_msg=label)
         np.testing.assert_array_equal(dists, expected[1], err_msg=label)
     if len(expected[0]) == 0:
         pytest.skip(
             "no blocked pairs in the last frame; positions checked, "
-            "blocker comparison was trivial"
-        )
+            "blocker comparison was trivial")
 
 
 @pytest.mark.glyco_kind("trajectory")
@@ -581,7 +549,33 @@ def test_get_blockers_frame_index_matches_single_frame_run(case, mode, runner):
     first = int(_analyzed(full.analysis)[0])
     single = runner(case, mode, frames=[first])
 
-    got_b, got_d = full.analysis.get_blockers(frame_index=0)  # recomputed (not cached)
+    got_b, got_d = full.analysis.get_blockers(
+        frame_index=0)  # recomputed (not cached)
     exp_b, exp_d = single.analysis.get_blockers()  # cached (only frame)
     np.testing.assert_array_equal(got_b, exp_b)
     np.testing.assert_array_equal(got_d, exp_d)
+
+
+def _gpu_ok():
+    from glycokit.utils import gpu_status
+    return gpu_status()[0]
+
+
+gpu = pytest.mark.skipif(not _gpu_ok(), reason="no usable CUDA GPU")
+
+
+@gpu
+@pytest.mark.parametrize("blocking", ["vdw", "cylinder"])
+def test_gpu_matches_cpu(universe, blocking):
+    kw = dict(blocking=blocking, outdir="unused")
+    c = GlycoAnalysis(universe, device="cpu", **kw).run(write=False)
+    g = GlycoAnalysis(universe.copy(), device="gpu", **kw).run(write=False)
+    np.testing.assert_array_equal(
+        c.results.glycan_counts, g.results.glycan_counts)
+    np.testing.assert_array_equal(
+        c.results.n_blocked_pairs, g.results.n_blocked_pairs)
+
+
+def test_device_gpu_rejected_for_v1(universe):
+    with pytest.raises(ValueError, match="only supported with --mode default"):
+        GlycoAnalysis(universe, mode="v1", device="gpu", outdir="unused")

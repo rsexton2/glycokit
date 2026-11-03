@@ -91,6 +91,10 @@ class FreesasaAnalysis(AnalysisBase):
     MDAnalysis residues (``structure_valid`` is False), areas are computed
     from the coordinates with the same radii and summed per residue.
 
+    Setup (atoms, radii, structure check) runs in ``__init__``, so the
+    ``structure_*`` attributes are set on this object even when a parallel
+    backend runs the frames in pickled copies.
+
     Results after :meth:`run`:
 
     * ``results.residue_areas``: shape (n_frames, n_residues)
@@ -108,6 +112,9 @@ class FreesasaAnalysis(AnalysisBase):
     :param float probe_radius: Probe radius in Angstrom.
     :param bool keep_atom_areas: Also store per-atom areas for every frame
         (can be large; most callers only need residue areas).
+    :param int n_threads: FreeSASA threads per calculation (keyword only).
+        Use 1 with a parallel backend (parallelism is then per frame) and
+        more for a single frame.
     """
 
     _analysis_algorithm_is_parallelizable = True
@@ -121,13 +128,15 @@ class FreesasaAnalysis(AnalysisBase):
         """
         return ("serial", "multiprocessing", "dask")
 
-    def __init__(self, ag, probe_radius, keep_atom_areas=False):
+    def __init__(self, ag, probe_radius, keep_atom_areas=False, *, n_threads=1):
         super().__init__(ag.universe.trajectory)
         self.ag = ag
         self.probe_radius = probe_radius
         self.keep_atom_areas = keep_atom_areas
+        self.n_threads = max(1, int(n_threads))  # needed by _make_params
         self.params = None
-        # Populated by _setup_atoms during the AnalysisBase preparation hook.
+
+        # Populated by _setup_atoms below.
         self._atom_names = None
         self._atom_resnames = None
         self._atom_resnums = None
@@ -139,9 +148,13 @@ class FreesasaAnalysis(AnalysisBase):
         self.n_vdw_radii = 0
         self._fixed_radii = None
         self._radii = None
+        self._radii_list = None
         self.structure_valid = None
         self.structure_message = None
         self.radii_source = None
+
+        # once, in the main process; the state is pickled to parallel workers
+        self._setup_atoms()
 
     def __getstate__(self):
         """
@@ -167,13 +180,22 @@ class FreesasaAnalysis(AnalysisBase):
 
     def _make_params(self):
         """
-        FreeSASA parameters: probe radius, one thread (parallelism is per frame).
+        FreeSASA parameters: probe radius and thread count.
 
-        :rtype: freesasa.Parameters
+        Lee-Richards (the default algorithm) is single-threaded in the FreeSASA
+        C library; requesting more threads makes ``freesasa.calc`` fail inside C
+        and the Python wrapper segfaults, so the count is clamped to 1.
         """
         params = freesasa.Parameters()
         params.setProbeRadius(self.probe_radius)
-        params.setNThreads(1)
+        n = self.n_threads
+        if n > 1 and params.algorithm() == freesasa.LeeRichards:
+            warnings.warn(
+                f"n_threads={n} ignored: FreeSASA Lee-Richards is single-threaded",
+                stacklevel=3,
+            )
+            n = 1
+        params.setNThreads(n)
         return params
 
     def _atom_elements(self):
@@ -200,8 +222,7 @@ class FreesasaAnalysis(AnalysisBase):
         return np.asarray(elements, dtype=object)
 
     def _prepare(self):
-        """Set up atoms and radii and allocate results (AnalysisBase hook)."""
-        self._setup_atoms()
+        """Allocate results (AnalysisBase hook); setup ran in ``__init__``."""
         n_res = len(self._unique_resindices)
         self.results = Results()
         self.results.residue_areas = np.zeros([self.n_frames, n_res])
@@ -213,7 +234,7 @@ class FreesasaAnalysis(AnalysisBase):
         """
         Per-atom FreeSASA fields, residue keys, radii and the structure check.
 
-        Needs no trajectory slicing, so it can be called before :meth:`run`.
+        Needs no trajectory slicing, so it is called from ``__init__``.
 
         :raises RuntimeError: If an atom has no radius (unknown element).
         """
@@ -231,31 +252,30 @@ class FreesasaAnalysis(AnalysisBase):
             _chain_label(c) for c in _optional_attr(atoms, "chainIDs", "")
         ]
 
-        (self._unique_resindices, first_atom, self._resindex_inverse) = np.unique(
-            self.ag.resindices, return_index=True, return_inverse=True
-        )
+        (self._unique_resindices, first_atom,
+         self._resindex_inverse) = np.unique(
+             self.ag.resindices, return_index=True, return_inverse=True)
         self._residue_keys = [
             (
-                self._atom_chains[i].strip(),
-                self._atom_resnums[i],
+                self._atom_chains[i].strip(), self._atom_resnums[i],
                 self._atom_resnames[i],
-            )
-            for i in first_atom
+            ) for i in first_atom
         ]
 
         # radii once; used by the FreeSASA structure and the coordinate path
         radii, self.n_guessed_radii, self.n_vdw_radii = self._executable_radii()
         self._fixed_radii = radii
         self._radii = radii
+        self._radii_list = radii.tolist()
         if self.n_vdw_radii:
             warnings.warn(
                 f"{self.n_vdw_radii} atom(s) have an element without a FreeSASA "
                 "element radius and use MDAnalysis vdW radii; areas may differ "
-                "from the freesasa executable",
-                stacklevel=2,
+                "from the freesasa executable", stacklevel=2,
             )
 
-        self.structure_valid, self.structure_message = self._check_residue_shapes()
+        self.structure_valid, self.structure_message = self._check_residue_shapes(
+        )
         self.radii_source = "classifier" if self.structure_valid else "executable"
 
     # -- FreeSASA structure ------------------------------------------------
@@ -263,6 +283,9 @@ class FreesasaAnalysis(AnalysisBase):
     def _build_structure(self):
         """
         FreeSASA structure of the current frame with the fixed radii.
+
+        Radii are set only if FreeSASA added every atom; otherwise the
+        mismatch is reported by :meth:`_check_residue_shapes`.
 
         :rtype: freesasa.Structure
         """
@@ -273,51 +296,31 @@ class FreesasaAnalysis(AnalysisBase):
 
         try:
             structure.addAtoms(
-                self._atom_names,
-                self._atom_resnames,
-                self._atom_resnums,
-                self._atom_chains,
-                xs,
-                ys,
-                zs,
+                self._atom_names, self._atom_resnames, self._atom_resnums,
+                self._atom_chains, xs, ys, zs,
             )
         except AttributeError:
             # older FreeSASA Python modules without addAtoms()
             for i in range(self.ag.n_atoms):
                 structure.addAtom(
-                    self._atom_names[i],
-                    self._atom_resnames[i],
-                    self._atom_resnums[i],
-                    self._atom_chains[i],
-                    xs[i],
-                    ys[i],
+                    self._atom_names[i], self._atom_resnames[i],
+                    self._atom_resnums[i], self._atom_chains[i], xs[i], ys[i],
                     zs[i],
                 )
 
-        for i, r in enumerate(self._fixed_radii):
-            structure.setRadius(i, float(r))
+        if structure.nAtoms() == len(self._radii_list):
+            structure.setRadii(self._radii_list)  # one call
         return structure
 
     def _compute_freesasa_result(self):
         """
         FreeSASA calculation on a structure of the current frame.
 
+        Radii were validated once in :meth:`_executable_radii`.
+
         :rtype: freesasa.Result
-        :raises RuntimeError: If any radius is not positive and finite.
         """
-        structure = self._build_structure()
-        radii = np.array([structure.radius(i) for i in range(structure.nAtoms())])
-        bad = np.flatnonzero(~np.isfinite(radii) | (radii <= 0))
-        if bad.size:
-            raise RuntimeError(
-                "invalid radii for atoms "
-                + ", ".join(
-                    f"{structure.residueName(i).strip()}:"
-                    f"{structure.atomName(i).strip()}"
-                    for i in bad[:10]
-                )
-            )
-        return freesasa.calc(structure, self.params)
+        return freesasa.calc(self._build_structure(), self.params)
 
     def _calc_from_coords(self):
         """
@@ -328,8 +331,9 @@ class FreesasaAnalysis(AnalysisBase):
 
         :rtype: freesasa.Result
         """
-        coords = np.asarray(self.ag.positions, dtype=np.float64).ravel().tolist()
-        return freesasa.calcCoord(coords, self._radii.tolist(), self.params)
+        coords = np.asarray(self.ag.positions,
+                            dtype=np.float64).ravel().tolist()
+        return freesasa.calcCoord(coords, self._radii_list, self.params)
 
     @staticmethod
     def _freesasa_residue_key(chain, residue_area):
@@ -339,8 +343,7 @@ class FreesasaAnalysis(AnalysisBase):
         :rtype: tuple[str, str, str]
         """
         return (
-            str(chain).strip(),
-            str(residue_area.residueNumber).strip(),
+            str(chain).strip(), str(residue_area.residueNumber).strip(),
             _freesasa_resname(residue_area.residueType),
         )
 
@@ -360,31 +363,28 @@ class FreesasaAnalysis(AnalysisBase):
                 seen.add(key)
             return False, (
                 "several MDAnalysis residues share a FreeSASA key "
-                f"(chain, resnum, resname): {dups[:5]}"
-            )
+                f"(chain, resnum, resname): {dups[:5]}")
 
         result = self._compute_freesasa_result()
         if result.nAtoms() != self.ag.n_atoms:
             return False, (
                 f"FreeSASA added {result.nAtoms()} of "
                 f"{self.ag.n_atoms} atoms (unclassifiable atoms "
-                "are not added by Structure.addAtom)"
-            )
+                "are not added by Structure.addAtom)")
 
         freesasa_keys = [
             self._freesasa_residue_key(chain, area)
             for chain, residue_dict in result.residueAreas().items()
             for area in residue_dict.values()
         ]
-        if len(freesasa_keys) != len(self._residue_keys) or set(freesasa_keys) != set(
-            self._residue_keys
-        ):
+        if len(freesasa_keys) != len(
+                self._residue_keys) or set(freesasa_keys) != set(
+                    self._residue_keys):
             missing = sorted(set(self._residue_keys) - set(freesasa_keys))
             extra = sorted(set(freesasa_keys) - set(self._residue_keys))
             return False, (
                 "FreeSASA residues do not match MDAnalysis residues; "
-                f"missing {missing[:5]}, unexpected {extra[:5]}"
-            )
+                f"missing {missing[:5]}, unexpected {extra[:5]}")
         return True, ""
 
     def _ordered_residue_areas(self, result):
@@ -410,7 +410,8 @@ class FreesasaAnalysis(AnalysisBase):
             raise ValueError(
                 f"FreeSASA did not return areas for these residues: {missing[:10]}"
             )
-        return np.asarray([area_by_key[key] for key in self._residue_keys], dtype=float)
+        return np.asarray(
+            [area_by_key[key] for key in self._residue_keys], dtype=float)
 
     def _executable_radii(self):
         """
@@ -430,9 +431,9 @@ class FreesasaAnalysis(AnalysisBase):
         elements = self._atom_elements()
         radii = np.full(self.ag.n_atoms, np.nan)
         n_guessed = n_vdw = 0
-        for i, (resname, name, element) in enumerate(
-            zip(self._atom_resnames, self._atom_names, elements)
-        ):
+        for i, (resname, name, element) in enumerate(zip(self._atom_resnames,
+                                                         self._atom_names,
+                                                         elements)):
             r = classifier.radius(resname, name)
             if r < 0:  # unknown to the classifier
                 r = _FREESASA_ELEMENT_RADII.get(element)
@@ -449,9 +450,9 @@ class FreesasaAnalysis(AnalysisBase):
         if bad.size:
             listed = ", ".join(
                 f"{self.ag[i].resname}:{self.ag[i].name} (element {elements[i] or '?'})"
-                for i in bad[:10]
-            )
-            raise RuntimeError(f"no valid radius for {bad.size} atom(s): {listed}")
+                for i in bad[:10])
+            raise RuntimeError(
+                f"no valid radius for {bad.size} atom(s): {listed}")
         return radii, n_guessed, n_vdw
 
     # -- per frame ---------------------------------------------------------
@@ -460,22 +461,26 @@ class FreesasaAnalysis(AnalysisBase):
         """
         Residue (and optionally atom) areas of the current frame (AnalysisBase hook).
 
+        Per-atom areas are read only when they are stored or needed for the
+        residue sums of an invalid structure.
+
         :raises ValueError: On an unexpected number of residue or atom areas.
         """
         if self.structure_valid:
             result = self._compute_freesasa_result()
+            residue_areas = self._ordered_residue_areas(result)
         else:
             result = self._calc_from_coords()
 
-        n_atoms = result.nAtoms()
-        atom_areas = np.fromiter(
-            (result.atomArea(i) for i in range(n_atoms)), dtype=float, count=n_atoms
-        )
-
-        if self.structure_valid:
-            residue_areas = self._ordered_residue_areas(result)
-        else:
-            residue_areas = self.sum_areas_per_residue(atom_areas)
+        atom_areas = None
+        if self.keep_atom_areas or not self.structure_valid:
+            n_atoms = result.nAtoms()
+            atom_areas = np.fromiter(
+                (result.atomArea(i) for i in range(n_atoms)), dtype=float,
+                count=n_atoms,
+            )
+            if not self.structure_valid:
+                residue_areas = self.sum_areas_per_residue(atom_areas)
 
         if len(residue_areas) != len(self._unique_resindices):
             raise ValueError(
@@ -490,8 +495,7 @@ class FreesasaAnalysis(AnalysisBase):
             if len(atom_areas) != self.ag.n_atoms:
                 raise ValueError(
                     "FreeSASA returned an unexpected number of atom areas: "
-                    f"{len(atom_areas)}; expected {self.ag.n_atoms}"
-                )
+                    f"{len(atom_areas)}; expected {self.ag.n_atoms}")
             self.results.atom_areas[self._frame_index, :] = atom_areas
 
     def sum_areas_per_residue(self, areas):
@@ -505,11 +509,9 @@ class FreesasaAnalysis(AnalysisBase):
         if len(areas) != self.ag.n_atoms:
             raise ValueError(
                 f"areas has {len(areas)} entries but atomgroup has "
-                f"{self.ag.n_atoms} atoms"
-            )
+                f"{self.ag.n_atoms} atoms")
         return np.bincount(
-            self._resindex_inverse,
-            weights=areas,
+            self._resindex_inverse, weights=areas,
             minlength=len(self._unique_resindices),
         )
 

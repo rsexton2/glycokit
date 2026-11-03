@@ -22,13 +22,11 @@ import contextlib
 import csv
 import difflib
 import json
-import multiprocessing as mp
 import operator
 import os
 import re
 import sys
 import warnings
-from concurrent.futures.process import ProcessPoolExecutor
 from itertools import repeat
 from pathlib import Path
 
@@ -41,43 +39,19 @@ from scipy.spatial import cKDTree
 from scipy.stats import t as t_res
 
 from glycokit.config import (
-    _BLOCKING_TESTS,
-    _JOB_ERRORS,
-    _KD_PAD,
-    _LOAD_ERRORS,
-    _SELECTION_ERRORS,
-    _V1_RESNAMES,
-    _V2_RESNAMES,
-    VMD_SCRIPT_NAME,
+    _BLOCKING_TESTS, _BOX_PREFILTER_EPS, _JOB_ERRORS, _KD_PAD, _LOAD_ERRORS,
+    _SELECTION_ERRORS, _V1_RESNAMES, _V2_RESNAMES, VMD_SCRIPT_NAME,
 )
 from glycokit.console import (
-    diagnostic,
-    error,
-    heading,
-    set_color_mode,
-    style,
-    written,
+    diagnostic, error, heading, set_color_mode, style, written,
 )
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import base_parser
 from glycokit.utils import (
-    _BOX_STATE,
-    _box_chunk,
-    _build_x_buckets,
-    _cylinder_blocked,
-    _first_altloc,
-    _fmt_float,
-    _init_box_worker,
-    _legacy_coords,
-    _package_versions,
-    _parser_defaults,
-    _resid_labels,
-    _sphere_blocked,
-    confirm_overwrite,
-    heavy_atoms,
-    load_universe,
-    pdb_atom_ids,
-    resolve_glycan_selection,
+    _cylinder_blocked, _first_altloc, _fmt_float, _legacy_coords,
+    _package_versions, _parser_defaults, _resid_labels, _sphere_blocked,
+    box_pairs, build_box_grid, confirm_overwrite, heavy_atoms, load_universe,
+    pdb_atom_ids, resolve_device, resolve_glycan_selection, set_box_threads,
     validate_arguments,
 )
 from glycokit.warnlog import warning_log
@@ -136,6 +110,7 @@ class GlycoAnalysis(AnalysisBase):
     blocking: str | None
     color: str
     cylinder_radius: float
+    device: str
     distance_cutoff: float
     force: bool
     frame_list: list[int] | None
@@ -171,7 +146,7 @@ class GlycoAnalysis(AnalysisBase):
 
         :rtype: tuple[str]
         """
-        return ("serial",)
+        return ("serial", )
 
     def __init__(self, u, verbose=False, *, _parser=None, _args=None, **kwargs):
         super().__init__(u.trajectory, verbose=verbose)
@@ -186,6 +161,8 @@ class GlycoAnalysis(AnalysisBase):
         self._blocker_radii = None
         self._start_residue_keys = None
         self._blocker_residue_keys = None
+        self._start_res_id = None
+        self._blocker_res_id = None
 
         # state built in _prepare
         self.frame_count = 0
@@ -212,9 +189,13 @@ class GlycoAnalysis(AnalysisBase):
         self._apply_params(defaults, _args, kwargs)
         self.verbose = verbose
 
+        self._device = None  # resolved in _prepare: 'cpu' or 'gpu'
+        self._gpu = None  # _gpu.GpuBlocking when self._device == 'gpu'
+
         self._validate_args()
         # empty --gs: use the glyco standardize glycan guesser on this Universe
-        self.gly_sel = resolve_glycan_selection(self.u, self.gly_sel, self._error)
+        self.gly_sel = resolve_glycan_selection(
+            self.u, self.gly_sel, self._error)
         self._validate_atom_selections()
 
     @classmethod
@@ -267,8 +248,7 @@ class GlycoAnalysis(AnalysisBase):
         if blocking not in allowed:
             raise ValueError(
                 f"mode {mode!r} does not support blocking={blocking!r} "
-                f"(allowed: {', '.join(allowed)})"
-            )
+                f"(allowed: {', '.join(allowed)})")
         return mode, blocking
 
     def _n_workers(self, processes=False):
@@ -282,7 +262,8 @@ class GlycoAnalysis(AnalysisBase):
         n = int(self.n_workers)
         if n == -1 and processes:
             try:
-                return max(1, len(os.sched_getaffinity(0)))  # honours CPU limits
+                return max(
+                    1, len(os.sched_getaffinity(0)))  # honours CPU limits
             except AttributeError:
                 return max(1, os.cpu_count() or 1)
         return n
@@ -318,11 +299,11 @@ class GlycoAnalysis(AnalysisBase):
             for name in unknown:
                 close = difflib.get_close_matches(name, known, n=1)
                 parts.append(
-                    f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else "")
-                )
+                    f"{name!r}" +
+                    (f" (did you mean {close[0]!r}?)" if close else ""))
             raise TypeError(
-                f"{type(self).__name__} got unknown parameter(s): " + ", ".join(parts)
-            )
+                f"{type(self).__name__} got unknown parameter(s): " +
+                ", ".join(parts))
 
         values.update(kwargs)
         for name, value in values.items():
@@ -335,7 +316,9 @@ class GlycoAnalysis(AnalysisBase):
         :rtype: str
         """
         resindices = [int(r) for r in resindices]
-        labels = [f"{r.resname}{r.resid}" for r in self.u.residues[resindices[:limit]]]
+        labels = [
+            f"{r.resname}{r.resid}" for r in self.u.residues[resindices[:limit]]
+        ]
         more = len(resindices) - limit
         return ", ".join(labels) + (f" (+{more} more)" if more > 0 else "")
 
@@ -358,7 +341,8 @@ class GlycoAnalysis(AnalysisBase):
         :raises RuntimeError: If :meth:`run` has not been called yet.
         """
         if getattr(self, "residue_areas", None) is None:
-            raise RuntimeError(f"{type(self).__name__}.run() must be called first")
+            raise RuntimeError(
+                f"{type(self).__name__}.run() must be called first")
 
     def _validate_args(self):
         """
@@ -367,29 +351,16 @@ class GlycoAnalysis(AnalysisBase):
         Library use without input files skips the file checks.
         """
         library_mode = (
-            self.parser is None
-            and self.top is None
-            and self.indir is None
-            and not self.traj
-        )
+            self.parser is None and self.top is None and self.indir is None
+            and not self.traj)
         validate_arguments(
-            self, self._error, check_inputs=not library_mode, warn=not self._from_cli
-        )
+            self, self._error, check_inputs=not library_mode,
+            warn=not self._from_cli)
 
     def run(
-        self,
-        start=None,
-        stop=None,
-        step=None,
-        frames=None,
-        verbose=None,
-        n_workers=None,
-        n_parts=None,
-        backend=None,
-        *,
-        unsupported_backend=False,
-        progressbar_kwargs=None,
-        write=True,
+        self, start=None, stop=None, step=None, frames=None, verbose=None,
+        n_workers=None, n_parts=None, backend=None, *,
+        unsupported_backend=False, progressbar_kwargs=None, write=True,
     ):
         """
         Run the analysis; see :meth:`MDAnalysis.analysis.base.AnalysisBase.run`.
@@ -408,14 +379,16 @@ class GlycoAnalysis(AnalysisBase):
         if all(v is None for v in (start, stop, step, frames)):
             start, stop, step = self.frame_start, self.frame_stop, self.frame_step
             frames = self.frame_list
-        self._run_slice = {"start": start, "stop": stop, "step": step, "frames": frames}
+        self._run_slice = {
+            "start": start,
+            "stop": stop,
+            "step": step,
+            "frames": frames
+        }
         self._write_outputs = bool(write)
         return super().run(
-            **self._run_slice,
-            verbose=verbose,
-            n_workers=n_workers,
-            n_parts=n_parts,
-            backend=backend,
+            **self._run_slice, verbose=verbose, n_workers=n_workers,
+            n_parts=n_parts, backend=backend,
             unsupported_backend=unsupported_backend,
             progressbar_kwargs=progressbar_kwargs,
         )
@@ -465,15 +438,12 @@ class GlycoAnalysis(AnalysisBase):
         prot_sel = self._compat_selection((self.prot_sel or "").strip())
         gly_sel = (self.gly_sel or "").strip()
         block_sel = self._compat_selection(
-            (self.block_sel or "").strip(), blockers=True
-        )
+            (self.block_sel or "").strip(), blockers=True)
 
         results = {}
-        for name, selection in (
-            ("protein", prot_sel),
-            ("glycan", gly_sel),
-            ("blockers", block_sel),
-        ):
+        for name, selection in (("protein", prot_sel), ("glycan", gly_sel),
+                                ("blockers", block_sel),
+                                ):
             if not selection:
                 results[name] = {
                     "valid": False,
@@ -494,12 +464,13 @@ class GlycoAnalysis(AnalysisBase):
                     "message": f"0 atoms selected ('{selection}')",
                 }
             else:
-                results[name] = {"valid": True, "message": f"{len(atoms):,} atoms"}
+                results[name] = {
+                    "valid": True,
+                    "message": f"{len(atoms):,} atoms"
+                }
 
-        if (
-            results["protein"]["valid"]
-            and len(self.u.select_atoms(f"({prot_sel}) and name CA")) == 0
-        ):
+        if (results["protein"]["valid"]
+                and len(self.u.select_atoms(f"({prot_sel}) and name CA")) == 0):
             results["protein"] = {
                 "valid": False,
                 "message": f"no CA atoms in protein selection ('{prot_sel}')",
@@ -508,10 +479,8 @@ class GlycoAnalysis(AnalysisBase):
         self.selection_validation_results = results
         if not all(r["valid"] for r in results.values()):
             problems = "; ".join(
-                f"{name}: {r['message']}"
-                for name, r in results.items()
-                if not r["valid"]
-            )
+                f"{name}: {r['message']}" for name, r in results.items()
+                if not r["valid"])
             self._error(f"invalid atom selection(s): {problems}")
 
         self._validated_prot_sel = prot_sel
@@ -522,7 +491,8 @@ class GlycoAnalysis(AnalysisBase):
             try:
                 self.u.select_atoms(f"({self.sasa_env})")
             except _SELECTION_ERRORS as e:
-                self._error(f"invalid --sasa-env selection ('{self.sasa_env}'): {e}")
+                self._error(
+                    f"invalid --sasa-env selection ('{self.sasa_env}'): {e}")
 
     def selection_report(self):
         """
@@ -556,16 +526,25 @@ class GlycoAnalysis(AnalysisBase):
             self._error("FreeSASA atom set is empty")
         sasa_res = np.unique(sasa_ag.resindices)
 
-        fsa = FreesasaAnalysis(sasa_ag, self.sasa_probe).run(
-            verbose=self._verbose,
-            progressbar_kwargs={"desc": "Running FreeSASA Analysis"},
-            **self._run_slice,
-        )
+        n = self._n_workers(processes=True)
+        parallel = n > 1 and self.n_frames > 1
+
+        # FreeSASA's Lee-Richards is single-threaded in this build; >1 thread
+        # crashes the process. Parallelism is per frame only.
+        fsa = FreesasaAnalysis(sasa_ag, self.sasa_probe, n_threads=1)
+        if parallel:
+            fsa.run(
+                backend="multiprocessing", n_workers=min(n, self.n_frames),
+                **self._run_slice)
+        else:
+            fsa.run(
+                verbose=self._verbose,
+                progressbar_kwargs={"desc": "Running FreeSASA Analysis"},
+                **self._run_slice)
+
         self._diag(
-            "[SASA diagnostic]",
-            f"mode={self._mode}",
-            f"universe_atoms={len(self.u.atoms)}",
-            f"sasa_atoms={len(sasa_ag)}",
+            "[SASA diagnostic]", f"mode={self._mode}",
+            f"universe_atoms={len(self.u.atoms)}", f"sasa_atoms={len(sasa_ag)}",
             f"sasa_residues={len(sasa_res)}",
             f"start_residues={self._n_res_rows}",
             f"structure_valid={fsa.structure_valid}",
@@ -576,11 +555,12 @@ class GlycoAnalysis(AnalysisBase):
         if areas.shape != (self.n_frames, len(sasa_res)):
             raise RuntimeError(
                 "Unexpected FreeSASA residue-area shape: got "
-                f"{areas.shape}, expected {(self.n_frames, len(sasa_res))}"
-            )
+                f"{areas.shape}, expected {(self.n_frames, len(sasa_res))}")
 
         column_of = {int(r): i for i, r in enumerate(sasa_res)}
-        missing = [int(r) for r in self._residue_resindices if int(r) not in column_of]
+        missing = [
+            int(r) for r in self._residue_resindices if int(r) not in column_of
+        ]
         self._check_sasa_coverage(missing)
 
         residue_areas = np.zeros((self.n_frames, self._n_res_rows))
@@ -615,8 +595,7 @@ class GlycoAnalysis(AnalysisBase):
             except _SELECTION_ERRORS as e:
                 self._error(
                     "could not build the legacy FreeSASA atom set "
-                    f"(needs PDB record types; use --sasa-env): {e}"
-                )
+                    f"(needs PDB record types; use --sasa-env): {e}")
         sel = f"({self._validated_prot_sel}) or ({self._validated_block_sel})"
         if self.sasa_env:
             sel += f" or ({self.sasa_env})"
@@ -629,8 +608,7 @@ class GlycoAnalysis(AnalysisBase):
         msg = (
             "FreeSASA structure did not match the MDAnalysis residues; SASA "
             "used MDAnalysis vdW radii instead of ProtOr, so areas will not "
-            "match the freesasa executable"
-        )
+            "match the freesasa executable")
         if self._legacy:
             self._error(msg)
         else:
@@ -644,15 +622,13 @@ class GlycoAnalysis(AnalysisBase):
             warnings.warn(
                 f"{len(missing)} start residue(s) are not in the FreeSASA "
                 "set and are treated as buried (SASA 0): "
-                f"{self._describe_residues(missing)}",
-                stacklevel=2,
+                f"{self._describe_residues(missing)}", stacklevel=2,
             )
         else:
             self._error(
                 f"FreeSASA has no area for {len(missing)} start residue(s) "
                 f"of the protein selection: {self._describe_residues(missing)}. "
-                "Add their atoms to the SASA set (e.g. with --sasa-env)"
-            )
+                "Add their atoms to the SASA set (e.g. with --sasa-env)")
 
     # endregion
 
@@ -670,6 +646,7 @@ class GlycoAnalysis(AnalysisBase):
 
         self._mode, self._blocking = self._resolve_test()
         self._legacy = self._mode != "default"
+        self._device = resolve_device(self.device, self._mode, self._error)
         self._validate_atom_selections()  # mode may have changed
 
         self._write_progress(0, self.n_frames)
@@ -681,21 +658,20 @@ class GlycoAnalysis(AnalysisBase):
         block_sel = self._validated_block_sel
 
         # start residues (heavy atoms) and their CA output columns
-        self._start_residue_atoms = heavy_atoms(self.u.select_atoms(f"({prot_sel})"))
+        self._start_residue_atoms = heavy_atoms(
+            self.u.select_atoms(f"({prot_sel})"))
         self.prot_atoms = self.u.select_atoms(f"({prot_sel}) and name CA")
         self.blocker_atoms = heavy_atoms(
-            self.u.select_atoms(f"({block_sel})"), legacy=self._legacy
-        )
+            self.u.select_atoms(f"({block_sel})"), legacy=self._legacy)
         self.gly_atoms = heavy_atoms(
-            self.u.select_atoms(f"({gly_sel})"), legacy=self._legacy
-        )
+            self.u.select_atoms(f"({gly_sel})"), legacy=self._legacy)
 
         # vdW radii up front, so missing-radius warnings appear before the loop
         self._blocker_radii = (
-            self._blocker_vdw_radii() if self._blocking == "vdw" else None
-        )
+            self._blocker_vdw_radii() if self._blocking == "vdw" else None)
 
-        self._residue_resindices = np.unique(self._start_residue_atoms.resindices)
+        self._residue_resindices = np.unique(
+            self._start_residue_atoms.resindices)
         self._n_res_rows = len(self._residue_resindices)
 
         # ---------------- FreeSASA ----------------
@@ -703,10 +679,10 @@ class GlycoAnalysis(AnalysisBase):
         if self.skip_sasa:
             # no SASA: every start residue is a surface residue (see
             # surface_residue_rows); NaN marks the areas as not computed
-            self.residue_areas = np.full((self.n_frames, self._n_res_rows), np.nan)
+            self.residue_areas = np.full(
+                (self.n_frames, self._n_res_rows), np.nan)
             self._diag(
-                "[SASA diagnostic]",
-                "skipped (--skip-sasa)",
+                "[SASA diagnostic]", "skipped (--skip-sasa)",
                 f"surface_residues={self._n_res_rows} (all start residues)",
             )
         else:
@@ -715,43 +691,48 @@ class GlycoAnalysis(AnalysisBase):
         # ---------------- residue bookkeeping ----------------
         self._blocker_resindex = np.asarray(self.blocker_atoms.resindices)
 
-        if not np.isin(self.prot_atoms.resindices, self._residue_resindices).all():
+        if not np.isin(self.prot_atoms.resindices,
+                       self._residue_resindices).all():
             self._error(
                 "some atoms named CA in the protein selection were "
-                "classified as hydrogens; check their element assignments"
-            )
+                "classified as hydrogens; check their element assignments")
         ca_res, ca_n = np.unique(self.prot_atoms.resindices, return_counts=True)
         if (ca_n > 1).any():
             self._error(
                 "more than one atom named CA in residue(s) "
                 f"{self._describe_residues(ca_res[ca_n > 1])}; results are "
-                "per residue and need exactly one (alternate locations?)"
-            )
+                "per residue and need exactly one (alternate locations?)")
         self._prot_atom_res_row = np.searchsorted(
-            self._residue_resindices, self.prot_atoms.resindices
-        )
+            self._residue_resindices, self.prot_atoms.resindices)
 
         # line-of-sight starts: every heavy atom of each start residue
         self.start_atoms = (
             heavy_atoms(self._start_residue_atoms, legacy=True)
-            if self._legacy
-            else self._start_residue_atoms
-        )
+            if self._legacy else self._start_residue_atoms)
         self._start_res_row = np.searchsorted(
-            self._residue_resindices, self.start_atoms.resindices
-        )
+            self._residue_resindices, self.start_atoms.resindices)
         self._start_resindex = np.asarray(self.start_atoms.resindices)
 
-        # residue keys for the box test, built on first use
+        self._gpu = None
+        if self._device == "gpu":
+            # pylint: disable-next=import-outside-toplevel
+            from glycokit import _gpu
+            self._gpu = _gpu.GpuBlocking(self)
+
+        # residue keys / ids for the box test, built on first use
         self._start_residue_keys = None
         self._blocker_residue_keys = None
+        self._start_res_id = None
+        self._blocker_res_id = None
         self._frame_cache = None
 
         n_ca = self.prot_atoms.n_atoms
         self.results = Results()
-        self.results.glycan_counts = np.zeros((self.n_frames, n_ca), dtype=np.int64)
+        self.results.glycan_counts = np.zeros(
+            (self.n_frames, n_ca), dtype=np.int64)
         self.results.sasa = self.residue_areas[:, self._prot_atom_res_row]
-        self.results.n_surface_residues = np.zeros(self.n_frames, dtype=np.int64)
+        self.results.n_surface_residues = np.zeros(
+            self.n_frames, dtype=np.int64)
         self.results.n_blocked_pairs = np.zeros(self.n_frames, dtype=np.int64)
         self.results.mean_blocked_distance = np.full(self.n_frames, np.nan)
         self.results.trajectory_frames = self._analyzed_frames()
@@ -764,15 +745,12 @@ class GlycoAnalysis(AnalysisBase):
             "vdw": f"vdw_scale={self.vdw_scale} vdw_probe={self.vdw_probe}",
         }[self._blocking]
         self._diag(
-            "[diagnostic]",
-            f"mode={self._mode}",
-            f"blocking={self._blocking}",
-            geometry,
-            f"n_workers={self._n_workers()}",
+            "[diagnostic]", f"mode={self._mode}", f"blocking={self._blocking}",
+            geometry, f"n_workers={self._n_workers()}",
             f"start_atoms={len(self.start_atoms)}",
             f"blocker_atoms={len(self.blocker_atoms)}",
             f"glycan_atoms={len(self.gly_atoms)}",
-            f"protein_CA={len(self.prot_atoms)}",
+            f"protein_CA={len(self.prot_atoms)}", f"device={self._device}",
         )
 
     @property
@@ -786,57 +764,56 @@ class GlycoAnalysis(AnalysisBase):
 
         The ``--bfactor-frame`` frame is cached for the CSV writers.
         """
+
+    def _single_frame(self):
+        """
+        Count visible glycan atoms for the current frame (AnalysisBase hook).
+
+        The ``--bfactor-frame`` frame always runs on the CPU and is cached
+        for the CSV writers; other frames use the GPU when enabled.
+        """
         k = self._frame_index
         mode, blocking = self._mode, self._blocking
 
         start_idx = self.surface_start_indices(k)
         self.results.n_surface_residues[k] = len(
-            np.unique(self._start_res_row[start_idx])
-        )
+            np.unique(self._start_res_row[start_idx]))
 
-        cand, vis, n_blocked, mean_d, blockers, dists = self._visibility(
-            start_idx, mode, blocking
-        )
+        if self._gpu is not None and k != self._output_k:
+            cand, vis, n_blocked, mean_d = self._gpu.visibility(
+                start_idx, mode, blocking)
+            blockers = dists = None
+        else:
+            cand, vis, n_blocked, mean_d, blockers, dists = self._visibility(
+                start_idx, mode, blocking)
+
         self.all_counts[k] = self._counts_from_visible_keys(vis)
         self.results.n_blocked_pairs[k] = n_blocked
         self.results.mean_blocked_distance[k] = mean_d
 
         if k == self._output_k:
             self._frame_cache = (
-                k,
-                mode,
-                blocking,
-                start_idx,
-                cand,
-                vis,
-                blockers,
-                dists,
+                k, mode, blocking, start_idx, cand, vis, blockers, dists,
             )
 
         self._diag(
-            "[diagnostic]",
-            f"frame={k}",
+            "[diagnostic]", f"frame={k}", f"device={self._device}",
             f"surface_start_atoms={len(start_idx)}",
-            f"candidate_keys={len(cand)}",
-            f"visible_keys={len(vis)}",
+            f"candidate_keys={len(cand)}", f"visible_keys={len(vis)}",
             f"blocker_rows={'n/a' if blockers is None else len(blockers)}",
             f"nonzero={np.count_nonzero(self.all_counts[k])}",
             f"total={int(self.all_counts[k].sum())}",
         )
 
         self.frame_count += 1
-        if (
-            self.frame_count % self._progress_every == 0
-            or self.frame_count == self.n_frames
-        ):
+        if (self.frame_count % self._progress_every == 0
+                or self.frame_count == self.n_frames):
             self._write_progress(self.frame_count, self.n_frames)
 
     def _conclude(self):
         """Store the residue histograms and write the requested output files."""
-        (
-            self.results.count_values,
-            self.results.residue_histograms,
-        ) = self._compute_residue_histograms()
+        (self.results.count_values, self.results.residue_histograms,
+         ) = self._compute_residue_histograms()
 
         if self._write_outputs:
             os.makedirs(self.outdir, exist_ok=True)
@@ -847,7 +824,8 @@ class GlycoAnalysis(AnalysisBase):
             self.write_residue_csv(frame_index=self.bfactor_frame)
 
             if self.write_excluded:
-                self.write_excluded_glycan_atoms_csv(frame_index=self.bfactor_frame)
+                self.write_excluded_glycan_atoms_csv(
+                    frame_index=self.bfactor_frame)
 
             if self.write_blockers and self._blocking != "box":
                 self.write_blockers_csv(frame_index=self.bfactor_frame)
@@ -858,7 +836,8 @@ class GlycoAnalysis(AnalysisBase):
             if self.write_stats or self.write_chimerax:
                 self.write_histograms_csv()
                 self.write_statistics_csv()
-                stats_pdb = self.write_statistics_pdb(frame_index=self.bfactor_frame)
+                stats_pdb = self.write_statistics_pdb(
+                    frame_index=self.bfactor_frame)
                 if self.write_chimerax:
                     self.write_chimerax_script(structure=stats_pdb)
 
@@ -888,7 +867,8 @@ class GlycoAnalysis(AnalysisBase):
             return np.arange(self._n_res_rows)
         if frame_index is None:
             frame_index = self._frame_index
-        return np.flatnonzero(self.residue_areas[frame_index] >= self.area_cutoff)
+        return np.flatnonzero(
+            self.residue_areas[frame_index] >= self.area_cutoff)
 
     def surface_start_indices(self, frame_index=None):
         """
@@ -928,8 +908,7 @@ class GlycoAnalysis(AnalysisBase):
 
         cutoff = float(self.distance_cutoff)
         neigh = gtree.query_ball_point(
-            P.astype(np.float64), cutoff + _KD_PAD, **self._kd_query_kwargs()
-        )
+            P.astype(np.float64), cutoff + _KD_PAD, **self._kd_query_kwargs())
         sizes = np.fromiter(map(len, neigh), dtype=np.intp, count=len(neigh))
         if sizes.sum() == 0:
             return empty, empty, no_dist, P, G
@@ -955,7 +934,11 @@ class GlycoAnalysis(AnalysisBase):
         """
         table = {str(k).upper(): float(v) for k, v in VDW_RADII.items()}
         if overrides:
-            table.update({str(k).upper(): float(v) for k, v in overrides.items()})
+            table.update(
+                {
+                    str(k).upper(): float(v)
+                    for k, v in overrides.items()
+                })
 
         atoms = self.blocker_atoms
         try:
@@ -978,20 +961,14 @@ class GlycoAnalysis(AnalysisBase):
         if unknown.any():
             bad = sorted({str(e) for e in elements[unknown]})
             warnings.warn(
-                f"No vdW radius for element(s) {bad}; using {default} Å", stacklevel=2
-            )
+                f"No vdW radius for element(s) {bad}; using {default} Å",
+                stacklevel=2)
             radii[unknown] = default
         return radii
 
     def _blocking_context(
-        self,
-        mode,
-        blocking,
-        exclude_own_residue=None,
-        exclude_start_overlap=True,
-        radii=None,
-        scale=None,
-        probe=None,
+        self, mode, blocking, exclude_own_residue=None,
+        exclude_start_overlap=True, radii=None, scale=None, probe=None,
     ):
         """
         Per-frame arrays and KD-trees shared by every start chunk.
@@ -1050,8 +1027,9 @@ class GlycoAnalysis(AnalysisBase):
         if probe < 0:
             raise ValueError(f"vdW probe must be non-negative, got {probe}")
         R = scale * np.asarray(radii, dtype=np.float64) + probe
-        if R.shape != (len(B),):
-            raise ValueError(f"radii must have shape ({len(B)},), got {R.shape}")
+        if R.shape != (len(B), ):
+            raise ValueError(
+                f"radii must have shape ({len(B)},), got {R.shape}")
         ctx["R2"] = R * R
         ctx["r_max"] = float(R.max()) if len(R) else 0.0
         ctx["search_radius"] = ctx["r_max"]
@@ -1094,7 +1072,7 @@ class GlycoAnalysis(AnalysisBase):
 
         out, dout = [], []
         for s in range(0, len(i), chunk):
-            ic, gc, dc = i[s : s + chunk], g[s : s + chunk], dist[s : s + chunk]
+            ic, gc, dc = i[s:s + chunk], g[s:s + chunk], dist[s:s + chunk]
 
             # broad phase around each segment midpoint
             mid = 0.5 * (P64[ic] + G64[gc])
@@ -1116,16 +1094,11 @@ class GlycoAnalysis(AnalysisBase):
 
             i_r, g_r = ic[rep], gc[rep]
             if cyl:
-                hit = _cylinder_blocked(P_test, G_test, B, i_r, g_r, jj, ctx["radius"])
+                hit = _cylinder_blocked(
+                    P_test, G_test, B, i_r, g_r, jj, ctx["radius"])
             else:
                 hit = _sphere_blocked(
-                    P_test,
-                    G_test,
-                    B,
-                    i_r,
-                    g_r,
-                    jj,
-                    ctx["R2"][jj],
+                    P_test, G_test, B, i_r, g_r, jj, ctx["R2"][jj],
                     ctx["exclude_start_overlap"],
                 )
             if hit.any():
@@ -1133,7 +1106,8 @@ class GlycoAnalysis(AnalysisBase):
                 dout.append(dc[rep][hit].astype(np.float64))
         return out, dout
 
-    def _iter_blocked_chunks(self, start_idx, ctx, start_chunk=2000, chunk=20000):
+    def _iter_blocked_chunks(
+            self, start_idx, ctx, start_chunk=2000, chunk=20000):
         """
         Yield cutoff pairs and their blockers per start chunk.
 
@@ -1143,7 +1117,7 @@ class GlycoAnalysis(AnalysisBase):
         no_rows = np.empty((0, 3), dtype=np.intp)
         no_dist = np.empty(0, dtype=np.float64)
         for s0 in range(0, len(start_idx), start_chunk):
-            sub = start_idx[s0 : s0 + start_chunk]
+            sub = start_idx[s0:s0 + start_chunk]
             i, g, dist, P, _ = self._cutoff_pairs(sub, ctx=ctx)
             if len(i) == 0:
                 continue
@@ -1162,19 +1136,15 @@ class GlycoAnalysis(AnalysisBase):
         :rtype: tuple[numpy.ndarray, numpy.ndarray]
         """
         if not row_parts:
-            return np.empty((0, 3), dtype=np.intp), np.empty(0, dtype=np.float64)
+            return np.empty((0, 3),
+                            dtype=np.intp), np.empty(0, dtype=np.float64)
         res, dres = np.concatenate(row_parts), np.concatenate(dist_parts)
         order = np.lexsort((res[:, 2], res[:, 1], res[:, 0]))
         return res[order], dres[order]
 
     def get_blockers(
-        self,
-        start_idx=None,
-        mode=None,
-        blocking=None,
-        exclude_own_residue=None,
-        exclude_start_overlap=True,
-        *,
+        self, start_idx=None, mode=None, blocking=None,
+        exclude_own_residue=None, exclude_start_overlap=True, *,
         frame_index=None,
     ):
         """
@@ -1213,17 +1183,14 @@ class GlycoAnalysis(AnalysisBase):
         # default options: the run cache of _frame_result is valid
         if start_idx is None and exclude_own_residue is None and exclude_start_overlap:
             *_, blockers, dists = self._frame_result(
-                k, mode, blocking, need_blockers=True
-            )
+                k, mode, blocking, need_blockers=True)
             return blockers, dists
 
         with self._at_analyzed_frame(k):
             if start_idx is None:
                 start_idx = self.surface_start_indices(k)
             *_, blockers, dists = self._visibility(
-                start_idx,
-                mode,
-                blocking,
+                start_idx, mode, blocking,
                 exclude_own_residue=exclude_own_residue,
                 exclude_start_overlap=exclude_start_overlap,
             )
@@ -1235,8 +1202,7 @@ class GlycoAnalysis(AnalysisBase):
         if blocking == "box":
             raise ValueError(
                 "the v1 box test does not identify blocking atoms; "
-                "pass mode='default' or mode='v2'"
-            )
+                "pass mode='default' or mode='v2'")
 
     @staticmethod
     def _residue_keys(atom_group):
@@ -1252,8 +1218,7 @@ class GlycoAnalysis(AnalysisBase):
         return [
             (str(resname).strip(), chain_id, str(label))
             for resname, chain_id, label in zip(
-                atom_group.resnames, chains, _resid_labels(atom_group)
-            )
+                atom_group.resnames, chains, _resid_labels(atom_group))
         ]
 
     # endregion
@@ -1289,14 +1254,15 @@ class GlycoAnalysis(AnalysisBase):
 
         ctx = self._blocking_context(mode, blocking, **ctx_kwargs)
         cand_parts, vis_parts, row_parts, dist_parts = [], [], [], []
-        for start_ids, gly_ids, rows, d in self._iter_blocked_chunks(start_idx, ctx):
+        for start_ids, gly_ids, rows, d in self._iter_blocked_chunks(start_idx,
+                                                                     ctx):
             pair_key = start_ids * n_gly + gly_ids
             res_rows = self._start_res_row[start_ids].astype(np.int64)
             cand_parts.append(np.unique(res_rows * n_gly + gly_ids))
             if len(rows):
                 blocked = np.unique(
-                    rows[:, 0].astype(np.int64) * n_gly + rows[:, 2].astype(np.int64)
-                )
+                    rows[:, 0].astype(np.int64) * n_gly +
+                    rows[:, 2].astype(np.int64))
                 keep = ~np.isin(pair_key, blocked)
                 res_rows, vis_gly = res_rows[keep], gly_ids[keep]
                 row_parts.append(rows)
@@ -1320,7 +1286,8 @@ class GlycoAnalysis(AnalysisBase):
         if len(blockers) == 0:
             return 0, np.nan
         n_gly = len(self.gly_atoms)
-        key = blockers[:, 0].astype(np.int64) * n_gly + blockers[:, 2].astype(np.int64)
+        key = blockers[:, 0].astype(np.int64) * n_gly + blockers[:, 2].astype(
+            np.int64)
         _, first = np.unique(key, return_index=True)
         return len(first), float(dists[first].mean())
 
@@ -1328,12 +1295,16 @@ class GlycoAnalysis(AnalysisBase):
         """
         Original GLYCO v1 box test (cutoff ``int(distance_cutoff)``, strict '<').
 
+        Runs :func:`box_pairs` (Numba), parallel over chunks of
+        ``starts_per_task`` start atoms; the per-chunk distance sums are
+        added in chunk order, as in the legacy process pool.
+
         :param start_idx: Indices into ``start_atoms``; None uses the surface
             start atoms of the current frame.
         :type start_idx: numpy.ndarray or None
-        :param workers: Worker processes; None uses ``n_workers``.
+        :param workers: Numba threads; None uses ``n_workers``.
         :type workers: int or None
-        :param int starts_per_task: Start atoms per worker task.
+        :param int starts_per_task: Start atoms per chunk.
         :return: ``(cand_keys, vis_keys, n_blocked, mean_blocked_distance)``
         :rtype: tuple[numpy.ndarray, numpy.ndarray, int, float]
         """
@@ -1347,51 +1318,40 @@ class GlycoAnalysis(AnalysisBase):
         if self._start_residue_keys is None:
             self._start_residue_keys = self._residue_keys(self.start_atoms)
             self._blocker_residue_keys = self._residue_keys(self.blocker_atoms)
+            # one shared dict: equal (resname, chain, resid) keys -> equal ids
+            ids = {}
+            self._start_res_id = np.array(
+                [ids.setdefault(k, len(ids)) for k in self._start_residue_keys],
+                dtype=np.int64,
+            )
+            self._blocker_res_id = np.array(
+                [
+                    ids.setdefault(k, len(ids))
+                    for k in self._blocker_residue_keys
+                ], dtype=np.int64,
+            )
 
         start_idx = np.asarray(start_idx, dtype=np.int64)
-        blocker_positions = _legacy_coords(self.blocker_atoms.positions)
-        initargs = (
-            _legacy_coords(self.start_atoms.positions[start_idx]),
-            np.asarray(self._start_res_row[start_idx], dtype=np.int64),
-            [self._start_residue_keys[i] for i in start_idx],
-            _legacy_coords(self.gly_atoms.positions),
-            blocker_positions,
-            self._blocker_residue_keys,
-            _build_x_buckets(blocker_positions),  # rebuilt for THIS frame
-            float(int(self.distance_cutoff)),  # v1: int(cutoff), strict '<'
-            n_gly,
-        )
+        P = _legacy_coords(self.start_atoms.positions[start_idx])
+        G = _legacy_coords(self.gly_atoms.positions)
+        B = _legacy_coords(self.blocker_atoms.positions)
 
-        n_starts = len(start_idx)
-        ranges = [
-            (lo, min(lo + starts_per_task, n_starts))
-            for lo in range(0, n_starts, starts_per_task)
-        ]
         if workers is None:
             workers = self._n_workers(processes=True)
-        workers = max(1, min(int(workers), len(ranges)))
+        set_box_threads(workers)
+        status, n_blk, d_sum = box_pairs(
+            P, self._start_res_id[start_idx], G, B, self._blocker_res_id,
+            *build_box_grid(B),  # blockers move, so rebuild per frame
+            float(int(self.distance_cutoff)),  # v1: int(cutoff), strict '<'
+            _BOX_PREFILTER_EPS, starts_per_task,
+        )
 
-        if workers == 1:
-            _init_box_worker(*initargs)
-            try:
-                results = [_box_chunk(r) for r in ranges]
-            finally:
-                _BOX_STATE.clear()
-        else:
-            with ProcessPoolExecutor(
-                max_workers=workers,
-                mp_context=mp.get_context("spawn"),
-                initializer=_init_box_worker,
-                initargs=initargs,
-            ) as executor:
-                results = list(executor.map(_box_chunk, ranges))
-
-        cand = [r[0] for r in results if len(r[0])]
-        vis = [r[1] for r in results if len(r[1])]
-        cand_keys = np.unique(np.concatenate(cand)) if cand else empty
-        vis_keys = np.unique(np.concatenate(vis)) if vis else empty
-        n_blocked = sum(int(r[2]) for r in results)
-        dist_sum = sum(float(r[3]) for r in results)
+        si, gi = np.nonzero(status)
+        keys = self._start_res_row[start_idx][si].astype(np.int64) * n_gly + gi
+        cand_keys = np.unique(keys)
+        vis_keys = np.unique(keys[status[si, gi] == 1])
+        n_blocked = int(n_blk.sum())
+        dist_sum = sum(float(x) for x in d_sum)  # chunk order, as before
         mean_d = dist_sum / n_blocked if n_blocked else np.nan
         return cand_keys, vis_keys, n_blocked, mean_d
 
@@ -1453,10 +1413,12 @@ class GlycoAnalysis(AnalysisBase):
         if n is None:
             n = getattr(self, "n_frames", None)
             if n is None:
-                raise RuntimeError("frame indices are only defined after run() started")
+                raise RuntimeError(
+                    "frame indices are only defined after run() started")
         n = int(n)
         if n <= 0:
-            self._error("no frames to analyze (check --frames/--start/--stop/--step)")
+            self._error(
+                "no frames to analyze (check --frames/--start/--stop/--step)")
         if frame_index is None:
             return n - 1
         if isinstance(frame_index, bool):
@@ -1504,8 +1466,7 @@ class GlycoAnalysis(AnalysisBase):
         with self._at_analyzed_frame(k):
             start_idx = self.surface_start_indices(k)
             cand, vis, _, _, blockers, dists = self._visibility(
-                start_idx, mode, blocking
-            )
+                start_idx, mode, blocking)
         return start_idx, cand, vis, blockers, dists
 
     # endregion
@@ -1521,10 +1482,12 @@ class GlycoAnalysis(AnalysisBase):
 
         :rtype: list[tuple[str, str, str]]
         """
-        _, (chains, resids, resnames) = self._identity_columns(
-            self.prot_atoms, atoms=False
-        )
-        return [(str(c), str(r), str(n)) for c, r, n in zip(chains, resids, resnames)]
+        _, (chains, resids,
+            resnames) = self._identity_columns(self.prot_atoms, atoms=False)
+        return [
+            (str(c), str(r), str(n))
+            for c, r, n in zip(chains, resids, resnames)
+        ]
 
     def _compute_residue_histograms(self):
         """
@@ -1533,7 +1496,8 @@ class GlycoAnalysis(AnalysisBase):
         :return: ``(values, hist)``; see :meth:`residue_histograms`.
         :rtype: tuple[numpy.ndarray, numpy.ndarray]
         """
-        counts = np.asarray(self.all_counts, dtype=np.int64)  # (n_frames, n_res)
+        counts = np.asarray(
+            self.all_counts, dtype=np.int64)  # (n_frames, n_res)
         _, n_res = counts.shape
         values = np.arange(int(counts.max(initial=0)) + 1)
         hist = np.zeros((n_res, len(values)), dtype=np.int64)
@@ -1565,8 +1529,7 @@ class GlycoAnalysis(AnalysisBase):
         except AttributeError:
             raise RuntimeError(
                 f"{type(self).__name__}.residue_histograms() is available "
-                "after run() has finished"
-            ) from None
+                "after run() has finished") from None
 
     def residue_statistics(self, confidence=0.95, method="percentile"):
         """
@@ -1584,7 +1547,8 @@ class GlycoAnalysis(AnalysisBase):
         :raises RuntimeError: Before :meth:`run`.
         """
         if not 0 < confidence < 1:
-            raise ValueError(f"confidence must be between 0 and 1, got {confidence}")
+            raise ValueError(
+                f"confidence must be between 0 and 1, got {confidence}")
         values, hist = self.residue_histograms()
         counts = np.asarray(self.all_counts, dtype=float)
         n = counts.shape[0]
@@ -1594,8 +1558,7 @@ class GlycoAnalysis(AnalysisBase):
 
         if method == "percentile":
             lower, upper = np.percentile(
-                counts, [100 * alpha, 100 * (1 - alpha)], axis=0
-            )
+                counts, [100 * alpha, 100 * (1 - alpha)], axis=0)
         elif method == "mean":
             if n > 1:
                 half = t_res.ppf(1 - alpha, n - 1) * std / np.sqrt(n)
@@ -1603,7 +1566,8 @@ class GlycoAnalysis(AnalysisBase):
                 half = np.zeros_like(mean)
             lower, upper = mean - half, mean + half
         else:
-            raise ValueError(f"method must be 'percentile' or 'mean', got {method!r}")
+            raise ValueError(
+                f"method must be 'percentile' or 'mean', got {method!r}")
 
         return {
             "mode": values[np.argmax(hist, axis=1)].astype(float),
@@ -1641,19 +1605,16 @@ class GlycoAnalysis(AnalysisBase):
                         int(values[v]),
                         int(hist[i, v]),
                         _fmt_float(hist[i, v] / n_frames),
-                    ]
-                    for v in nz
-                )
+                    ] for v in nz)
 
         return self._write_csv(
-            output,
-            "residue_histograms.csv",
-            [*names, "glycan_count", "n_frames", "fraction"],
-            batches(),
+            output, "residue_histograms.csv",
+            [*names, "glycan_count", "n_frames", "fraction"], batches(),
             "Residue histograms",
         )
 
-    def write_statistics_csv(self, output=None, confidence=0.95, method="percentile"):
+    def write_statistics_csv(
+            self, output=None, confidence=0.95, method="percentile"):
         """
         residue_statistics.csv: mode, mean, std, max and interval per residue.
 
@@ -1671,15 +1632,10 @@ class GlycoAnalysis(AnalysisBase):
                 *(c[i] for c in cols),
                 int(stats["n_frames"][i]),
                 *(_fmt_float(stats[k][i]) for k in keys),
-            ]
-            for i in range(len(self.prot_atoms))
-        )
+            ] for i in range(len(self.prot_atoms)))
         return self._write_csv(
-            output,
-            "residue_statistics.csv",
-            [*names, "n_frames", *keys],
-            [rows],
-            "Residue statistics",
+            output, "residue_statistics.csv", [*names, "n_frames", *keys],
+            [rows], "Residue statistics",
         )
 
     def _ensure_occupancies(self):
@@ -1695,13 +1651,14 @@ class GlycoAnalysis(AnalysisBase):
         if dims is None or np.allclose(np.asarray(dims[:3]), 1.0):
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
             path.write_text(
-                "".join(line for line in lines if not line.startswith("CRYST1")),
+                "".join(
+                    line for line in lines if not line.startswith("CRYST1")),
                 encoding="utf-8",
             )
 
     def write_statistics_pdb(
-        self, frame_index=None, output=None, confidence=0.95, method="percentile"
-    ):
+            self, frame_index=None, output=None, confidence=0.95,
+            method="percentile"):
         """
         b_factors_stats.pdb: trajectory statistics in the B-factor and occupancy
         columns.
@@ -1728,10 +1685,9 @@ class GlycoAnalysis(AnalysisBase):
         self._ensure_tempfactors()
         self._ensure_occupancies()
 
-        for name, values in (
-            ("B-factor", stats["mode"]),
-            ("occupancy", stats["width"]),
-        ):
+        for name, values in (("B-factor", stats["mode"]), ("occupancy",
+                                                           stats["width"]),
+                             ):
             if values.size and values.max() > 999.99:
                 warnings.warn(
                     f"max {name} value {values.max():g} exceeds the PDB "
@@ -1760,12 +1716,8 @@ class GlycoAnalysis(AnalysisBase):
         return output
 
     def write_chimerax_script(
-        self,
-        structure=None,
-        output=None,
-        palette="white:red",
-        worm_radii=(0.25, 2.0),
-        background_color="lightgray",
+            self, structure=None, output=None, palette="white:red",
+            worm_radii=(0.25, 2.0), background_color="lightgray",
     ):
         """
         ChimeraX command script (.cxc) for the trajectory statistics.
@@ -1805,8 +1757,7 @@ class GlycoAnalysis(AnalysisBase):
         if wmax == 0:
             warnings.warn(
                 "all interval widths are 0 (e.g. a single analyzed frame); "
-                "the worm has a constant radius",
-                stacklevel=2,
+                "the worm has a constant radius", stacklevel=2,
             )
 
         spec = "(#1 & protein)"
@@ -1816,10 +1767,7 @@ class GlycoAnalysis(AnalysisBase):
             "# Auto-generated by glyco (GLYCO): trajectory statistics",
             f"# B-factor  = histogram maximum, colored white (0) -> red ({bmax:g})",
             "# occupancy = width of the 95% interval of the glycan count",
-            "close session",
-            f'open "{path}"',
-            "hide atoms",
-            "show cartoons",
+            "close session", f'open "{path}"', "hide atoms", "show cartoons",
             f"color #1 {background_color}",
             f"color byattribute bfactor {spec} palette {palette} "  # noqa: ISC004
             f"range 0,{bmax:g} noValueColor {background_color}",
@@ -1850,9 +1798,7 @@ class GlycoAnalysis(AnalysisBase):
         _, cols = self._identity_columns(self.prot_atoms, atoms=False)
         n = len(residues)
         fig, axes = plt.subplots(
-            (n + 3) // 4,
-            min(n, 4),
-            squeeze=False,
+            (n + 3) // 4, min(n, 4), squeeze=False,
             figsize=(4 * min(n, 4), 3 * ((n + 3) // 4)),
         )
         for ax, i in zip(axes.ravel(), residues):
@@ -1931,7 +1877,10 @@ class GlycoAnalysis(AnalysisBase):
         ]
         if atoms:
             names += [f"{p}atom_name", f"{p}atom_serial"]
-            cols += [self._atom_attr(atom_group, "names"), pdb_atom_ids(atom_group)]
+            cols += [
+                self._atom_attr(atom_group, "names"),
+                pdb_atom_ids(atom_group)
+            ]
         return names, cols
 
     def _output_path(self, output, default_name):
@@ -1940,7 +1889,8 @@ class GlycoAnalysis(AnalysisBase):
 
         :rtype: pathlib.Path
         """
-        path = Path(output) if output is not None else Path(self.outdir) / default_name
+        path = Path(output) if output is not None else Path(
+            self.outdir) / default_name
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -2001,8 +1951,8 @@ class GlycoAnalysis(AnalysisBase):
         return output
 
     def write_blockers_csv(
-        self, frame_index=None, output=None, chunk=100_000, mode=None, blocking=None
-    ):
+            self, frame_index=None, output=None, chunk=100_000, mode=None,
+            blocking=None):
         """
         blockers.csv: one row per (start atom, blocking atom, glycan atom) of
         one frame.
@@ -2023,18 +1973,13 @@ class GlycoAnalysis(AnalysisBase):
         """
         k, tf = self._output_frame(frame_index)
         *_, blockers, distances = self._frame_result(
-            k, mode, blocking, need_blockers=True
-        )
+            k, mode, blocking, need_blockers=True)
 
         s_names, s_cols = self._identity_columns(self.start_atoms, "start")
         b_names, b_cols = self._identity_columns(self.blocker_atoms, "blocker")
         g_names, g_cols = self._identity_columns(self.gly_atoms, "glycan")
         header = [
-            "analyzed_frame",
-            "trajectory_frame",
-            *s_names,
-            *b_names,
-            *g_names,
+            "analyzed_frame", "trajectory_frame", *s_names, *b_names, *g_names,
             "pair_distance",
         ]
 
@@ -2044,15 +1989,14 @@ class GlycoAnalysis(AnalysisBase):
                 hi = min(lo + chunk, len(blockers))
                 s, b, g = s_i[lo:hi], b_i[lo:hi], g_i[lo:hi]
                 yield zip(
-                    repeat(k),
-                    repeat(tf),
-                    *(c[s].tolist() for c in s_cols),
+                    repeat(k), repeat(tf), *(c[s].tolist() for c in s_cols),
                     *(c[b].tolist() for c in b_cols),
                     *(c[g].tolist() for c in g_cols),
                     [_fmt_float(x) for x in distances[lo:hi]],
                 )
 
-        return self._write_csv(output, "blockers.csv", header, batches(), "Blockers")
+        return self._write_csv(
+            output, "blockers.csv", header, batches(), "Blockers")
 
     def write_bfactors(self, frame_index=None, output=None):
         """
@@ -2078,8 +2022,7 @@ class GlycoAnalysis(AnalysisBase):
             warnings.warn(
                 f"max B-factor value {values.max():g} exceeds the PDB "
                 "B-factor column width (999.99); use b_factors.npy for "
-                "the raw values",
-                stacklevel=2,
+                "the raw values", stacklevel=2,
             )
         atoms, cols = self._residue_atom_rows()
         self.u.atoms.tempfactors = np.zeros(self.u.atoms.n_atoms)
@@ -2113,21 +2056,12 @@ class GlycoAnalysis(AnalysisBase):
                 int(r.n_surface_residues[k]),
                 int(r.n_blocked_pairs[k]),
                 _fmt_float(r.mean_blocked_distance[k]),
-            ]
-            for k, tf in enumerate(self._analyzed_frames())
-        )
+            ] for k, tf in enumerate(self._analyzed_frames()))
         return self._write_csv(
-            output,
-            "frame_summary.csv",
-            [
-                "analyzed_frame",
-                "trajectory_frame",
-                "n_surface_residues",
-                "n_blocked_pairs",
-                "mean_blocked_distance",
-            ],
-            [rows],
-            "Frame summary",
+            output, "frame_summary.csv", [
+                "analyzed_frame", "trajectory_frame", "n_surface_residues",
+                "n_blocked_pairs", "mean_blocked_distance",
+            ], [rows], "Frame summary",
         )
 
     def write_residue_csv(self, frame_index=None, output=None):
@@ -2151,23 +2085,18 @@ class GlycoAnalysis(AnalysisBase):
         counts, sasa = self.all_counts[k], self.results.sasa[k]
         keep = np.flatnonzero(counts > 0)
         rows = zip(
-            repeat(k),
-            repeat(tf),
-            *(c[keep].tolist() for c in cols),
-            counts[keep].tolist(),
-            [_fmt_float(x) for x in sasa[keep]],
+            repeat(k), repeat(tf), *(c[keep].tolist() for c in cols),
+            counts[keep].tolist(), [_fmt_float(x) for x in sasa[keep]],
         )
         return self._write_csv(
-            output,
-            "residue_summary.csv",
-            ["analyzed_frame", "trajectory_frame", *names, "glycan_count", "sasa"],
-            [rows],
-            "Residue summary",
+            output, "residue_summary.csv", [
+                "analyzed_frame", "trajectory_frame", *names, "glycan_count",
+                "sasa"
+            ], [rows], "Residue summary",
         )
 
     def write_excluded_glycan_atoms_csv(
-        self, frame_index=None, output=None, mode=None, blocking=None
-    ):
+            self, frame_index=None, output=None, mode=None, blocking=None):
         """
         Glycan atoms missing from each surface residue's visibility union.
 
@@ -2191,7 +2120,8 @@ class GlycoAnalysis(AnalysisBase):
         :raises RuntimeError: Before :meth:`run`.
         """
         k, tf = self._output_frame(frame_index)
-        start_idx, cand_keys, vis_keys, _, _ = self._frame_result(k, mode, blocking)
+        start_idx, cand_keys, vis_keys, _, _ = self._frame_result(
+            k, mode, blocking)
         n_gly = len(self.gly_atoms)
         empty = np.empty(0, dtype=np.int64)
 
@@ -2201,8 +2131,8 @@ class GlycoAnalysis(AnalysisBase):
         g_names, g_cols = self._identity_columns(self.gly_atoms, "glycan")
         ca_of_row = {int(r): i for i, r in enumerate(self._prot_atom_res_row)}
         surface_rows = (
-            np.unique(self._start_res_row[start_idx]) if len(start_idx) else empty
-        )
+            np.unique(self._start_res_row[start_idx])
+            if len(start_idx) else empty)
 
         def batches():
             for row in surface_rows.tolist():
@@ -2230,32 +2160,20 @@ class GlycoAnalysis(AnalysisBase):
                     continue
 
                 reasons = np.where(
-                    is_candidate[excluded],
-                    "blocked_for_all_start_atoms",
+                    is_candidate[excluded], "blocked_for_all_start_atoms",
                     "outside_distance_cutoff",
                 )
                 yield zip(
-                    repeat(k),
-                    repeat(tf),
-                    *(repeat(v) for v in identity),
-                    repeat(count),
-                    *(c[excluded].tolist() for c in g_cols),
+                    repeat(k), repeat(tf), *(repeat(v) for v in identity),
+                    repeat(count), *(c[excluded].tolist() for c in g_cols),
                     reasons.tolist(),
                 )
 
         return self._write_csv(
-            output,
-            "excluded_glycan_atoms.csv",
-            [
-                "analyzed_frame",
-                "trajectory_frame",
-                *r_names,
-                "glycan_count",
-                *g_names,
-                "reason",
-            ],
-            batches(),
-            "Excluded glycan atoms",
+            output, "excluded_glycan_atoms.csv", [
+                "analyzed_frame", "trajectory_frame", *r_names, "glycan_count",
+                *g_names, "reason",
+            ], batches(), "Excluded glycan atoms",
         )
 
     @staticmethod
@@ -2287,11 +2205,15 @@ class GlycoAnalysis(AnalysisBase):
                 "glycan": self._validated_gly_sel,
                 "blockers": self._validated_block_sel,
             },
-            "parameters": {n: getattr(self, n) for n in self._param_names},
+            "parameters": {
+                n: getattr(self, n)
+                for n in self._param_names
+            },
             "trajectory_frames": self._analyzed_frames().tolist(),
             "versions": _package_versions(),
         }
-        output.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
+        output.write_text(
+            json.dumps(config, indent=2, default=str), encoding="utf-8")
         written("Run configuration", output, base=self.outdir)
         return output
 
@@ -2307,8 +2229,7 @@ class GlycoAnalysis(AnalysisBase):
                     "current": current,
                     "total": total,
                     "percent": int(100 * current / total) if total else 0,
-                },
-                f,
+                }, f,
             )
         os.replace(temp_file, self.progress_file)
 
@@ -2328,8 +2249,7 @@ class GlycoAnalysis(AnalysisBase):
         breaks = np.flatnonzero(np.diff(sorted_indices) != 1) + 1
         return " ".join(
             str(run[0]) if len(run) == 1 else f"{run[0]} to {run[-1]}"
-            for run in np.split(sorted_indices, breaks)
-        )
+            for run in np.split(sorted_indices, breaks))
 
     def write_vmd_user_script(self, output=None, frame_offset=0):
         """
@@ -2353,7 +2273,8 @@ class GlycoAnalysis(AnalysisBase):
         u = self.u
         topology = getattr(u, "filename", None)
         if not topology:
-            self._error("--write-vmd: could not determine the topology filename")
+            self._error(
+                "--write-vmd: could not determine the topology filename")
         topology = Path(topology).resolve()
         if not topology.is_file():
             self._error(
@@ -2370,7 +2291,8 @@ class GlycoAnalysis(AnalysisBase):
             Path(p).resolve() for p in trajectory_files if p is not None
         ]
         if not trajectory_files:
-            self._error("--write-vmd: could not determine the trajectory filename(s)")
+            self._error(
+                "--write-vmd: could not determine the trajectory filename(s)")
         for path in trajectory_files:
             if not path.is_file():
                 self._error(
@@ -2385,12 +2307,12 @@ class GlycoAnalysis(AnalysisBase):
             )
         atoms, cols = self._residue_atom_rows()
         analyzed = self._analyzed_frames()
-        data_max = float(counts.max()) if counts.size and counts.max() > 0 else 1.0
+        data_max = float(
+            counts.max()) if counts.size and counts.max() > 0 else 1.0
 
         lines = [
             "# Auto-generated by glyco (GLYCO)",
-            "# Bulk per-frame assignment of residue values",
-            "",
+            "# Bulk per-frame assignment of residue values", "",
             f"set molid [mol new {self._tcl_quote(topology.as_posix())} waitfor all]",
             "",
         ]
@@ -2399,30 +2321,20 @@ class GlycoAnalysis(AnalysisBase):
             for t in trajectory_files
         ]
         lines += [
-            "",
-            "mol modselect 0 $molid protein",
-            "mol modstyle 0 $molid NewCartoon",
-            "mol modcolor 0 $molid User",
-            "",
-            f"set n_traj_frames {int(reader.n_frames)}",
-            "set n_vmd_frames [molinfo $molid get numframes]",
-            "",
+            "", "mol modselect 0 $molid protein",
+            "mol modstyle 0 $molid NewCartoon", "mol modcolor 0 $molid User",
+            "", f"set n_traj_frames {int(reader.n_frames)}",
+            "set n_vmd_frames [molinfo $molid get numframes]", "",
             "if {$n_vmd_frames == $n_traj_frames + 1} {",
             "    animate delete beg 0 end 0 $molid",
             '    puts "Deleted duplicate first frame."',
             "} elseif {$n_vmd_frames == $n_traj_frames} {",
-            '    puts "Frame counts match; no frame deleted."',
-            "} else {",
+            '    puts "Frame counts match; no frame deleted."', "} else {",
             (
                 '    error "Frame mismatch: VMD has $n_vmd_frames frames, but the '
                 "trajectory has $n_traj_frames. Expected equal counts or exactly "
-                'one extra VMD frame."'
-            ),
-            "}",
-            "",
-            "# Set User color scale",
-            f"mol scaleminmax $molid 0 0 {data_max:.10g}",
-            "",
+                'one extra VMD frame."'), "}", "", "# Set User color scale",
+            f"mol scaleminmax $molid 0 0 {data_max:.10g}", "",
             f"set sel [atomselect $molid {{index {self._index_ranges(atoms.indices)}}}]",
             "",
         ]
@@ -2431,13 +2343,10 @@ class GlycoAnalysis(AnalysisBase):
             values = " ".join(str(int(v)) for v in counts[k, cols])
             lines += [
                 f"# Data frame {k} -> VMD frame {vmd_frame}",
-                f"$sel frame {vmd_frame}",
-                f"$sel set user {{{values}}}",
-                "",
+                f"$sel frame {vmd_frame}", f"$sel set user {{{values}}}", "",
             ]
         lines += [
-            "$sel delete",
-            'puts "Finished assigning per-residue user values."',
+            "$sel delete", 'puts "Finished assigning per-residue user values."',
             "",
         ]
 
@@ -2460,21 +2369,17 @@ def _run_job(args, top, traj, outdir, verbose, parser=None):
         u = load_universe(top, traj)
     except _LOAD_ERRORS as e:
         msg = (
-            f"could not load {top}"
-            + (
+            f"could not load {top}" + (
                 " with -b/--traj (do all trajectory files "
-                "match the topology's atom count?)"
-                if traj
-                else ""
-            )
-            + f": {e}"
-        )
+                "match the topology's atom count?)" if traj else "") + f": {e}")
         if parser is not None:
             parser.error(msg)
         raise ValueError(msg) from e
     GlycoAnalysis.from_args(
-        u, args, parser=parser, top=top, traj=traj, indir=None, outdir=outdir
-    ).run(verbose=verbose, progressbar_kwargs={"desc": "Running GLYCO Analysis"})
+        u, args, parser=parser, top=top, traj=traj, indir=None,
+        outdir=outdir).run(
+            verbose=verbose,
+            progressbar_kwargs={"desc": "Running GLYCO Analysis"})
 
 
 def _structure_outdirs(structures, base_outdir):
@@ -2482,10 +2387,9 @@ def _structure_outdirs(structures, base_outdir):
     stems = [Path(p).stem for p in structures]
     return [
         os.path.join(
-            base_outdir,
-            stem if stems.count(stem) == 1 else Path(path).name.replace(".", "_"),
-        )
-        for path, stem in zip(structures, stems)
+            base_outdir, stem
+            if stems.count(stem) == 1 else Path(path).name.replace(".", "_"),
+        ) for path, stem in zip(structures, stems)
     ]
 
 
@@ -2512,7 +2416,8 @@ def main(argv=None):
             return 1
         os.makedirs(args.outdir, exist_ok=True)
         with warning_log(log_path):
-            _run_job(args, args.top, args.traj, args.outdir, verbose, parser=parser)
+            _run_job(
+                args, args.top, args.traj, args.outdir, verbose, parser=parser)
         return 0
 
     # --indir: the base directory only holds subfolders and the log
@@ -2520,7 +2425,8 @@ def main(argv=None):
     failures = []
     with warning_log(log_path):
         outdirs = _structure_outdirs(args.structures, args.outdir)
-        for n, (path, outdir) in enumerate(zip(args.structures, outdirs), start=1):
+        for n, (path, outdir) in enumerate(zip(args.structures, outdirs),
+                                           start=1):
             heading(f"[{n}/{len(args.structures)}] {path}")
             if not confirm_overwrite(outdir, args):
                 failures.append((path, "output exists and overwrite declined"))
