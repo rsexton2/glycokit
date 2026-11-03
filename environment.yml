@@ -12,4 +12,7 @@ dependencies:
   - ca-certificates
   - certifi
   - openssl
+  - numba
+  - cupy
+  - numba-cuda
 prefix: /home/r2/miniforge3/envs/glycotest
