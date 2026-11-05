@@ -16,6 +16,8 @@ import numpy as np
 import scipy
 from numba import njit, prange
 
+from glycokit import viewer_scripts as vs
+from glycokit.config import VMD_SCRIPT_NAME  # add to the existing import
 from glycokit.config import (
     _BLOCKING_TESTS, _BOX_PREFILTER_EPS, _HYDROGEN_NAME, DEFAULT_OUTDIR_NAME,
     OUTPUT_FILES,
@@ -761,10 +763,14 @@ def default_outdir(cfg):
 
 def planned_outputs(outdir, cfg):
     """Paths of the files a run with parameters ``cfg`` writes into ``outdir``."""
-    return [
-        os.path.join(outdir, name) for name, flag in OUTPUT_FILES.items()
+    names = [
+        name for name, flag in OUTPUT_FILES.items()
         if flag is None or getattr(cfg, flag)
     ]
+    top = getattr(cfg, "top", None)
+    if getattr(cfg, "write_vmd", False) and top and not vs.vmd_readable(top):
+        names.append(vs.vmd_structure_name(VMD_SCRIPT_NAME))
+    return [os.path.join(outdir, name) for name in names]
 
 
 def confirm_overwrite(outdir, cfg, names=None):

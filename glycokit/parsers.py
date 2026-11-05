@@ -261,8 +261,8 @@ def base_parser():
     add_shared_option(
         misc, "N_WORKERS",
         "parallel workers; -1 uses all processors. Threads for the KD-tree "
-        "queries (vdw/cylinder), Numba threads for the --mode v1 box test.",
-        default=1,
+        "queries (vdw/cylinder), Numba threads for the --mode v1 box test, "
+        "and processes for frame-parallel FreeSASA on trajectories", default=1,
     )
     add_option(
         misc, ("--device", ),
@@ -654,9 +654,19 @@ def sasa_parser():
         dest="write_stats", action="store_true")
     add_option(
         output, ("--stats-bin-width", ),
-        "histogram bin width for --write-stats (in Angstrom^2)",
-        dest="stats_bin_width", type=positive_float, default=5.0,
+        "histogram bin width for --write-stats and --write-chimerax (in "
+        "Angstrom^2)", dest="stats_bin_width", type=positive_float, default=5.0,
         metavar="ANGSTROM^2")
+    add_option(
+        output, ("--write-vmd", ),
+        "also write sasa_user.vmd, a VMD Tcl script that loads the "
+        'per-residue SASA of every analyzed frame into the "user" atom '
+        "attribute", dest="write_vmd", action="store_true")
+    add_option(
+        output, ("--write-chimerax", ),
+        "also write sasa_stats.cxc, a ChimeraX script that colors by the "
+        "histogram maximum and draws a worm by the interval width (implies "
+        "--write-stats)", dest="write_chimerax", action="store_true")
 
     misc = parser.add_argument_group("misc")
     add_shared_option(

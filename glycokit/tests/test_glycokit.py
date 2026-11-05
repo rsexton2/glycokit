@@ -103,7 +103,8 @@ def fixture_first_case(pytestconfig):
 
 
 def _make_analysis(glyco, glyco_params, case, universe=None, **overrides):
-    """GlycoAnalysis for ``case`` with the case parameters plus ``overrides``."""
+    """GlycoAnalysis for ``case`` with the case parameters plus ``overrides``.
+    """
     if universe is None:
         universe = glyco.load_universe(case.top, list(case.traj) or None)
     return glyco.GlycoAnalysis(universe, **{**glyco_params(case), **overrides})
@@ -115,7 +116,8 @@ def _analyzed(analysis):
 
 
 def ca_keys(analysis):
-    """(chain, resid+icode, resname) of every CA column, as the CSVs write them."""
+    """(chain, resid+icode, resname) of every CA column, as the CSVs write them.
+    """
     return analysis.residue_identity()
 
 
@@ -167,7 +169,8 @@ def _mode_cli_args(mode):
 
 
 def test_parameters_are_declared():
-    """Every base_parser() destination has a class annotation (keeps E1101 meaningful)."""
+    """Every base_parser() destination has a class annotation (keeps E1101
+    meaningful)."""
     declared = set(inspect.get_annotations(GlycoAnalysis))
     destinations = set(_parser_defaults())
     missing = sorted(destinations - declared)
@@ -206,7 +209,8 @@ def test_histograms_before_run_raise(glyco, glyco_params, first_case):
 
 
 def test_invalid_selection_reports_value_error(glyco, glyco_params, first_case):
-    """An invalid selection is reported as ValueError, not an MDAnalysis error."""
+    """An invalid selection is reported as ValueError, not an MDAnalysis error.
+    """
     with pytest.raises(ValueError, match="invalid atom selection"):
         _make_analysis(
             glyco, glyco_params, first_case, gly_sel="nosuchkeyword FOO")
@@ -237,7 +241,7 @@ def test_bad_trajectory_load_is_value_error(glyco, first_case, tmp_path):
         )
 
     assert "with -b/--traj" in str(exc_info.value)  # trajectory-specific hint
-    assert exc_info.value.__cause__ is not None  # original load error is chained
+    assert exc_info.value.__cause__ is not None  # original load error chained
 
 
 def test_bad_trajectory_load_cli_exit(
@@ -377,7 +381,8 @@ def test_excluded_atoms_consistent(case, mode, runner, glyco):
 
 
 def test_case_selections(case, case_settings, glyco):
-    """Per-structure selections select atoms; legacy glycan names select the same atoms."""
+    """Per-structure selections select atoms; legacy glycan names select the
+    same atoms."""
     s = case_settings(case)
     u = glyco.load_universe(case.top, list(case.traj) or None)
     glycans = u.select_atoms(s["gs"])
@@ -400,7 +405,8 @@ def test_case_selections(case, case_settings, glyco):
 
 def test_cli_matches_library(
         case, mode, runner, glyco, glyco_cli_args, pytestconfig, tmp_path):
-    """The CLI writes the same results as the library; FreeSASA gets valid radii."""
+    """The CLI writes the same results as the library; FreeSASA gets valid
+    radii."""
     r = runner(case, mode)  # cached library run
 
     cli_dir = tmp_path / "cli"
@@ -445,7 +451,8 @@ def test_bfactors_pdb_per_residue(case, mode, runner, glyco):
 
 @pytest.mark.slow
 def test_n_workers_serial_equals_parallel(case, mode, runner, pytestconfig):
-    """-j only changes how work is split (KD-tree threads, or v1 box processes)."""
+    """-j only changes how work is split (KD-tree threads, or v1 box processes).
+    """
     n = pytestconfig.glyco_n_workers
     n = 2 if n == 1 else n
     serial = runner(case, mode, n_workers=1)
@@ -488,7 +495,8 @@ def test_frame_slicing_consistent(case, mode, runner):
 
 @pytest.mark.glyco_kind("trajectory")
 def test_trajectory_frame_equals_single_structure(case, mode, runner, glyco):
-    """Frame k of the trajectory == the same coordinates as a 1-frame Universe."""
+    """Frame k of the trajectory == the same coordinates as a 1-frame Universe.
+    """
     full = runner(case, mode)
     k, frame = _last_analyzed(full)
     u = glyco.load_universe(case.top, list(case.traj))
@@ -543,7 +551,8 @@ def test_get_blockers_ignores_trajectory_position(case, mode, runner):
 @pytest.mark.glyco_kind("trajectory")
 @pytest.mark.glyco_modes(*BLOCKER_MODES)
 def test_get_blockers_frame_index_matches_single_frame_run(case, mode, runner):
-    """get_blockers(frame_index=0) of the full run == the same frame analyzed alone."""
+    """get_blockers(frame_index=0) of the full run == the same frame analyzed
+    alone."""
     full = runner(case, mode)
     _last_analyzed(full)  # skips with < 2 frames
     first = int(_analyzed(full.analysis)[0])
@@ -557,7 +566,9 @@ def test_get_blockers_frame_index_matches_single_frame_run(case, mode, runner):
 
 
 def _gpu_ok():
-    from glycokit.utils import gpu_status
+    from glycokit.utils import (
+        gpu_status,  # pylint: disable=import-outside-toplevel
+    )
     return gpu_status()[0]
 
 

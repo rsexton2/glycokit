@@ -11,7 +11,10 @@ import pytest
 from glycokit._cli_common import (
     n_workers_int, non_negative_float, positive_float,
 )
-from glycokit.parsers import base_parser, compare_parser, standardize_parser
+from glycokit.parsers import (
+    SASA_CHIMERAX_STATS, base_parser, compare_parser, sasa_parser,
+    standardize_parser,
+)
 from glycokit.standardize import StandardizeOptions
 
 NAN_SPELLINGS = ("nan", "NaN", "-nan")
@@ -250,3 +253,38 @@ def test_standardize_parser_defaults_match_options():
     assert (None if a.keep_his_names else "HIS") == o.histidine
     assert (
         "warn" if a.allow_incomplete else "error") == o.incomplete_sidechains
+
+
+def _sasa(argv):
+    return sasa_parser().parse_args(["-a", "in.pdb", *argv])
+
+
+def test_sasa_parser_viewer_defaults():
+    a = _sasa([])
+    assert a.write_vmd is None and a.write_chimerax is None
+    assert a.vmd_frame_offset == 0
+    assert a.chimerax_stat == "mean"
+    assert a.chimerax_structure is None
+    assert a.chimerax_palette == "white:blue"
+
+
+@pytest.mark.parametrize(
+    "flag, dest",
+    [("--write-vmd", "write_vmd"), ("--write-chimerax", "write_chimerax")])
+def test_sasa_parser_optional_paths(flag, dest):
+    assert getattr(_sasa([flag]), dest) is True  # default name
+    assert getattr(_sasa([flag, "o/x"]), dest) == "o/x"  # explicit path
+    assert getattr(_sasa([flag, "-o", "d"]), dest) is True  # next option kept
+
+
+@pytest.mark.parametrize(
+    "argv", [["--chimerax-stat", "mode"], ["--vmd-frame-offset", "1.5"], ])
+def test_sasa_parser_viewer_rejects(argv):
+    with pytest.raises(SystemExit) as exc:
+        _sasa(argv)
+    assert exc.value.code == 2
+
+
+def test_sasa_chimerax_stats_match_cli():
+    from glycokit import sasa  # pylint: disable=import-outside-toplevel
+    assert set(sasa.CHIMERAX_STATS) == set(SASA_CHIMERAX_STATS)
