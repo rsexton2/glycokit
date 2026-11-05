@@ -47,8 +47,8 @@ from glycokit.utils import (
     _cylinder_blocked, _first_altloc, _fmt_float, _legacy_coords,
     _package_versions, _parser_defaults, _resid_labels, _sphere_blocked,
     box_pairs, build_box_grid, confirm_overwrite, heavy_atoms, load_universe,
-    resolve_device, resolve_glycan_selection, resolve_workers, set_box_threads,
-    validate_arguments,
+    prepare_plotting, resolve_device, resolve_glycan_selection, resolve_workers,
+    set_box_threads, validate_arguments,
 )
 from glycokit.warnlog import warning_log
 
@@ -106,6 +106,8 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
     _output_attribute = "glycan_count"
     _stats_generator = "glyco (GLYCO)"
     _stats_quantity = "glycan count"
+    _plot_label = "glycan count"
+    _timeseries_plot_name = "glyco_timeseries.png"
 
     # Parameters set by _apply_params from base_parser() destinations.
     # Declared here for linters and readers; values come from the parser.
@@ -141,6 +143,7 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
     write_blockers: bool
     write_chimerax: bool
     write_excluded: bool
+    write_plots: bool
     write_stats: bool
     write_vmd: bool
 
@@ -837,6 +840,10 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
                 if self.write_chimerax:
                     self.write_chimerax_script(structure=stats_pdb)
 
+            if self.write_plots:
+                self.plot_timeseries()
+                self.plot_histograms()
+
             self.write_run_config()
         self._frame_cache = None
         self._gpu = None
@@ -1461,6 +1468,7 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
         output = self._output_path(output, "residue_histograms.png")
         fig.savefig(output, dpi=150)
         plt.close(fig)
+        written("Histogram plot", output, base=self.outdir)
         return output
 
     def _diag(self, *parts):
@@ -1770,6 +1778,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     set_color_mode(args.color)
     validate_arguments(args, parser.error)  # before loading any files
+    if args.write_plots:
+        prepare_plotting(parser.error)
 
     is_streamlit = os.environ.get("GLYCO_STREAMLIT") == "1"
     verbose = False if is_streamlit else args.verbose

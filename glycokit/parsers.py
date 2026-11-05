@@ -5,8 +5,9 @@ from pathlib import Path
 
 from glycokit._cli_common import (
     add_color, add_frame_output, add_frame_slicing, add_option,
-    add_shared_option, chain_id, command_line, glyco_parser, name_list,
-    non_negative_float, non_negative_int, positive_float, resname_pair, segid,
+    add_shared_option, add_write_plots, chain_id, command_line, glyco_parser,
+    name_list, non_negative_float, non_negative_int, positive_float,
+    resname_pair, segid,
 )
 from glycokit.config import (
     COMPARE_DEFAULTS, COMPARE_ENV_PREFIX, _compare_default,
@@ -251,6 +252,10 @@ def base_parser():
         "histogram maximum and draws a worm by the interval width (implies "
         "--write-stats)", dest="write_chimerax", action="store_true",
     )
+    add_write_plots(
+        output, "glyco_timeseries.png (total glycan count per analyzed "
+        "frame with a histogram in the margin) and residue_histograms.png "
+        "(count histograms of the residues with the widest intervals)")
 
     misc = parser.add_argument_group("misc")
     add_option(
@@ -667,6 +672,9 @@ def sasa_parser():
         "also write sasa_stats.cxc, a ChimeraX script that colors by the "
         "histogram maximum and draws a worm by the interval width (implies "
         "--write-stats)", dest="write_chimerax", action="store_true")
+    add_write_plots(
+        output, "sasa_timeseries.png (total SASA per analyzed frame with a "
+        "histogram in the margin)")
 
     misc = parser.add_argument_group("misc")
     add_shared_option(

@@ -23,11 +23,10 @@ from pathlib import Path
 import MDAnalysis as mda
 import numpy as np
 
+from glycokit import viewer_scripts as vs
 from glycokit.console import written
 from glycokit.structure_io import PDB_SUFFIXES, pdb_chain_map, write_pdb
 from glycokit.utils import _fmt_float, _resid_labels, pdb_atom_ids
-
-from . import viewer_scripts as vs
 
 
 def _finite_max(values, default=0.0):
@@ -64,6 +63,9 @@ class ResidueOutputMixin:
     #: wording of the statistics ChimeraX script
     _stats_generator = "glycokit"
     _stats_quantity = "value"
+    #: y-axis label and default file name of plot_timeseries()
+    _plot_label = "value"
+    _timeseries_plot_name = "residue_timeseries.png"
 
     def __init_subclass__(cls, *, abstract=False, **kwargs):
         super().__init_subclass__(**kwargs)  # cooperative: AnalysisBase, object
@@ -452,6 +454,124 @@ class ResidueOutputMixin:
             self.u.atoms.occupancies = old_occ
         self._strip_placeholder_cryst1(output, dims)
         written(label, output, base=self.outdir or ".")
+        return output
+
+    # -- plots -------------------------------------------------------------
+
+    def _plot_x(self, x):
+        """x values and axis label of the time-series plot."""
+        if x == "frame":
+            return self._analyzed_frames(), "trajectory frame"
+        if x == "time":
+            times = getattr(self, "times", None)
+            if times is None or len(times) != self.n_frames:
+                raise RuntimeError("frame times are only available after run()")
+            return np.asarray(times, dtype=float), "time (ps)"
+        raise ValueError(f"x must be 'frame' or 'time', got {x!r}")
+
+    def _hist_edges(self, values):
+        """Bin edges of residue_histograms() for ``values``."""
+        finite = values[np.isfinite(values)]
+        width = self._stats_bin_width()  # pylint: disable=assignment-from-none
+        if width is None:  # one bin per integer 0..max
+            n_bins = int(np.floor(finite.max(initial=0))) + 1
+            return np.arange(n_bins + 1) - 0.5
+        width = float(width)
+        n_bins = int(np.floor(finite.max(initial=0) / width)) + 1
+        return np.arange(n_bins + 1) * width
+
+    @staticmethod
+    def _reduce_columns(m, reduce):
+        """Per-frame sum or mean over columns; NaN where no value is finite."""
+        finite = np.isfinite(m)
+        total = np.where(finite, m, 0.0).sum(axis=1)
+        n = finite.sum(axis=1)
+        if reduce == "mean":
+            total = total / np.maximum(n, 1)
+        return np.where(n > 0, total, np.nan)
+
+    def plot_timeseries(
+            self, residues=None, output=None, *, values=None, reduce="sum",
+            x="frame", max_residues=8, figsize=(8.0, 4.0), dpi=150):
+        """
+        Line plot of the per-residue quantity over the analysed frames, with
+        a horizontal histogram of the same values in the right margin
+        (requires matplotlib).
+
+        :param residues: Column indices (as in the CSV outputs); one line
+            and one histogram per residue. None: one line for the per-frame
+            ``reduce`` over all residues.
+        :param output: Default ``<outdir>/<_timeseries_plot_name>``.
+        :param values: (n_frames, n_columns) array; None uses the hook.
+        :param str reduce: ``'sum'`` or ``'mean'`` (only with residues=None).
+        :param str x: ``'frame'`` (trajectory frame) or ``'time'`` (ps).
+        :param int max_residues: Upper limit for ``residues``.
+        :rtype: pathlib.Path
+        :raises RuntimeError: Before :meth:`run`.
+        :raises ValueError: Bad ``values``, ``reduce``, ``x`` or ``residues``.
+        """
+        import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
+
+        self._require_run()
+        m = np.asarray(
+            self._residue_values() if values is None else values, dtype=float)
+        if m.ndim != 2:
+            raise ValueError(
+                f"values must be (n_frames, n_columns), got {m.shape}")
+        xs, xlabel = self._plot_x(x)
+        if len(xs) != len(m):
+            raise ValueError(f"{len(m)} rows of values for {len(xs)} frames")
+
+        if residues is None:
+            if reduce not in ("sum", "mean"):
+                raise ValueError(
+                    f"reduce must be 'sum' or 'mean', got {reduce!r}")
+            series = [
+                (
+                    f"{reduce} over {m.shape[1]} residues",
+                    self._reduce_columns(m, reduce))
+            ]
+            bins = "auto"
+        else:
+            cols = np.atleast_1d(np.asarray(residues, dtype=int))
+            if cols.size == 0 or cols.size > max_residues:
+                raise ValueError(
+                    f"give 1 to {max_residues} residues, got {cols.size}")
+            if cols.min() < -m.shape[1] or cols.max() >= m.shape[1]:
+                raise ValueError(
+                    f"residue indices out of range for {m.shape[1]} columns")
+            _, idents = self._column_identities()
+            series = [
+                (f"{idents[i][0]}:{idents[i][2]}{idents[i][1]}", m[:, i])
+                for i in cols.tolist()
+            ]
+            bins = self._hist_edges(m[:, cols])
+
+        fig, axs = plt.subplot_mosaic(
+            [["series", "hist"]], width_ratios=(4, 1), sharey=True,
+            layout="constrained", figsize=figsize)
+        ax, hax = axs["series"], axs["hist"]
+        marker = "o" if len(xs) < 2 else None
+        single = len(series) == 1
+        for label, y in series:
+            (line, ) = ax.plot(xs, y, lw=1, marker=marker, label=label)
+            finite = y[np.isfinite(y)]
+            if finite.size:
+                hax.hist(
+                    finite, bins=bins, orientation="horizontal",
+                    color=line.get_color(),
+                    histtype="stepfilled" if single else "step",
+                    alpha=0.5 if single else 1.0)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(self._plot_label)
+        ax.legend(fontsize="small")
+        hax.set_xlabel("frames")
+        hax.tick_params(axis="y", labelleft=False)
+
+        output = self._output_path(output, self._timeseries_plot_name)
+        fig.savefig(output, dpi=dpi)
+        plt.close(fig)
+        written("Time series plot", output, base=self.outdir or ".")
         return output
 
     # -- ChimeraX plans ----------------------------------------------------

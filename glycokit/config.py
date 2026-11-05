@@ -39,38 +39,40 @@ _KD_PAD = 1e-3
 _WARNING_LINE = re.compile(r"^.*?:\d+: (?P<cat>\w+): (?P<msg>.*)$")
 
 OUTPUT_FILES = {
-    "b_factors.pdb": None,
+    "b_factors_stats.pdb": "write_stats",
     "b_factors.npy": None,
+    "b_factors.pdb": None,
+    "blockers.csv": "write_blockers",
+    "excluded_glycan_atoms.csv": "write_excluded",
     "frame_summary.csv": None,
+    "glyco_stats.cxc": "write_chimerax",
+    "glyco_timeseries.png": "write_plots",
+    "residue_histograms.csv": "write_stats",
+    "residue_histograms.png": "write_plots",
+    "residue_statistics.csv": "write_stats",
     "residue_summary.csv": None,
     "run_config.json": None,
-    "excluded_glycan_atoms.csv": "write_excluded",
-    "blockers.csv": "write_blockers",
-    "residue_histograms.csv": "write_stats",
-    "residue_statistics.csv": "write_stats",
-    "b_factors_stats.pdb": "write_stats",
-    "glyco_stats.cxc": "write_chimerax",
     VMD_SCRIPT_NAME: "write_vmd",
 }
 
 # Built-in defaults. GLYCO_COMPARE_<NAME> overrides them; command-line
 # options override both. String defaults go through the option's ``type``.
 COMPARE_DEFAULTS = {
+    "AREA_CUTOFF": 30.0,
+    "CYLINDER_RADIUS": 1.4,
+    "DISTANCE_CUTOFF": 30.0,
+    "GLYCAN_SELECTION": "",  # empty: "resname <GLYCANS>"
+    "GLYCANS": None,  # legacy -glycan / -glycans argument
+    "GLYCO_COMMAND": "glyco run",  # split like a shell command line
+    "N_WORKERS": 8,
     "PDB": "../data/gper_std.pdb",
     "PROBE": 1.4,
-    "AREA_CUTOFF": 30.0,
-    "DISTANCE_CUTOFF": 30.0,
-    "CYLINDER_RADIUS": 1.4,
     "PROTEIN_SELECTION": "protein",
-    "GLYCANS": None,  # legacy -glycan / -glycans argument
-    "GLYCAN_SELECTION": "",  # empty: "resname <GLYCANS>"
-    "N_WORKERS": 8,
     "SASA_TOLERANCE": 0.006,  # legacy RSA output is rounded to 2 decimals
-    "V1_ROOT": "/home/r2/opt/GLYCO",
-    "V2_ROOT": "/home/r2/opt/GLYCO-2",
     "V1_ENV": "GLYCO",
+    "V1_ROOT": "/home/r2/opt/GLYCO",
     "V2_ENV": "GLYCO2",
-    "GLYCO_COMMAND": "glyco run",  # split like a shell command line
+    "V2_ROOT": "/home/r2/opt/GLYCO-2",
 }
 
 # Errors MDAnalysis raises for an invalid or unsupported selection string:

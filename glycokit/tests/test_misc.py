@@ -21,9 +21,14 @@ EXPECTED_HOSTS = {GlycoAnalysis, FreesasaAnalysis}
 def _run(cls, universe):
     """Build and run a small instance of each host class."""
     if cls is GlycoAnalysis:
-        return cls(universe, outdir="unused").run(write=False)
+        obj = GlycoAnalysis(universe, outdir="unused")
+        obj.run(write=False)
+        return obj
     if cls is FreesasaAnalysis:
-        return cls(universe.select_atoms("protein and not name H*"), 1.4).run()
+        obj = FreesasaAnalysis(
+            universe.select_atoms("protein and not name H*"), 1.4)
+        obj.run()
+        return obj
     pytest.fail(f"add a constructor for {cls.__name__} to _run()")
 
 
@@ -136,3 +141,35 @@ def test_viewer_scripts_need_run(universe, tmp_path):
     g = GlycoAnalysis(universe, outdir=str(tmp_path))
     with pytest.raises(RuntimeError):
         g.write_vmd_user_script()
+
+
+@pytest.mark.parametrize(
+    "cls", ResidueOutputMixin._registry, ids=lambda c: c.__name__)
+def test_plot_timeseries_for_hosts(cls, universe, tmp_path):
+    mpl = pytest.importorskip("matplotlib")
+    mpl.use("Agg")
+    obj = _run(cls, universe)
+    assert obj.plot_timeseries(output=tmp_path / "a.png").stat().st_size > 0
+    assert obj.plot_timeseries(
+        residues=[0, 1], output=tmp_path / "b.png", x="time").is_file()
+
+
+def test_plot_timeseries_rejects_bad_input(universe, tmp_path):
+    mpl = pytest.importorskip("matplotlib")
+    mpl.use("Agg")
+    obj = _run(GlycoAnalysis, universe)
+    out = tmp_path / "x.png"
+    with pytest.raises(ValueError, match="reduce"):
+        obj.plot_timeseries(output=out, reduce="max")
+    with pytest.raises(ValueError, match="residues"):
+        obj.plot_timeseries(output=out, residues=list(range(9)))
+    with pytest.raises(ValueError, match="x must be"):
+        obj.plot_timeseries(output=out, x="ns")
+
+
+def test_glyco_write_plots(tmp_path, universe):
+    mpl = pytest.importorskip("matplotlib")
+    mpl.use("Agg")
+    GlycoAnalysis(universe, outdir=str(tmp_path), write_plots=True).run()
+    assert (tmp_path / "glyco_timeseries.png").is_file()
+    assert (tmp_path / "residue_histograms.png").is_file()

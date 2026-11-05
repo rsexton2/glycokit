@@ -138,6 +138,8 @@ class FreesasaAnalysis(ResidueOutputMixin, AnalysisBase):
     _vmd_error_label = "--write-vmd"
     _stats_generator = "glyco sasa"
     _stats_quantity = "residue SASA"
+    _plot_label = "SASA (Å$^2$)"
+    _timeseries_plot_name = "sasa_timeseries.png"
 
     @classmethod
     def get_supported_backends(cls):

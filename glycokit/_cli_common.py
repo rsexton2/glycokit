@@ -235,3 +235,12 @@ def add_frame_output(group, files):
         f"index among the ANALYZED frames (negative counts from the end) "
         f"used for {files}. None: the last analyzed frame",
         dest="bfactor_frame", type=int, default=None, metavar="N")
+
+
+def add_write_plots(group, files):
+    """--write-plots (shared by glyco run and glyco sasa)."""
+    add_option(
+        group, ("--write-plots", ),
+        f"also write {files} (PNG, requires matplotlib). Without a display "
+        "the non-interactive Agg backend is used unless MPLBACKEND is set",
+        dest="write_plots", action="store_true")

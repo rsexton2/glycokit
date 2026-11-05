@@ -17,7 +17,9 @@ from glycokit.config import _LOAD_ERRORS, _SELECTION_ERRORS
 from glycokit.console import heading, set_color_mode, style
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import sasa_parser
-from glycokit.utils import confirm_overwrite, heavy_atoms, load_universe
+from glycokit.utils import (
+    confirm_overwrite, heavy_atoms, load_universe, prepare_plotting,
+)
 from glycokit.warnlog import warning_log
 
 OUTPUT_NAMES = (
@@ -29,6 +31,7 @@ STATS_NAMES = (
 # the script names come from FreesasaAnalysis (single source of truth)
 VMD_NAME = FreesasaAnalysis._vmd_script_name  # pylint: disable=protected-access
 CHIMERAX_NAME = FreesasaAnalysis._chimerax_script_name  # pylint: disable=protected-access
+PLOT_NAME = FreesasaAnalysis._timeseries_plot_name  # pylint: disable=protected-access
 
 
 def planned_outputs(args):
@@ -80,6 +83,9 @@ def main(argv=None):
         args.write_stats = True  # as in glyco run
 
     _check_frame_options(parser, args)
+    if args.write_plots:
+        prepare_plotting(parser.error)
+
     for path in [args.top, *(args.traj or [])]:
         if not os.path.isfile(path):
             parser.error(f"no such file: {path!r}")
@@ -152,6 +158,9 @@ def main(argv=None):
             stats_pdb = fsa.write_statistics_pdb(  # name: _stats_pdb_name
                 frame_index=args.bfactor_frame,
                 label="SASA statistics B-factors")
+
+        if args.write_plots:
+            fsa.plot_timeseries()
 
         try:
             if args.write_vmd:

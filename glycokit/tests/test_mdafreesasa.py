@@ -2,9 +2,12 @@ import MDAnalysis as mda
 import numpy as np
 import pytest
 
+from glycokit import sasa
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.tests.conftest import LEGACY_PDB
 from glycokit.utils import heavy_atoms
+
+BASE = ["-a", str(LEGACY_PDB), "-y", "--sel", "protein and resid 1:30"]
 
 
 def _small_traj(small_universe, n=6):
@@ -44,10 +47,25 @@ def test_threads_clamped_once(small_universe):
 @pytest.mark.parametrize(
     "extra", [["--step", "0"], ["--frames", "-1"], ["--frames", "99"]])
 def test_glyco_sasa_bad_frames(tmp_path, extra):
-    from glycokit import sasa  # pylint: disable=import-outside-toplevel
     with pytest.raises(SystemExit) as exc:
         sasa.main(
             ["-a",
              str(LEGACY_PDB), "-o",
              str(tmp_path / "o"), "-y", *extra])
     assert exc.value.code == 2  # argparse error, not a traceback
+
+
+def test_glyco_sasa_write_plots(tmp_path, monkeypatch):
+    pytest.importorskip("matplotlib")
+    monkeypatch.setenv("MPLBACKEND", "Agg")  # restored after the test
+    out = tmp_path / "out"
+    assert sasa.main([*BASE, "-o", str(out), "--write-plots"]) == 0
+    assert (out / sasa.PLOT_NAME).stat().st_size > 0
+
+
+def test_glyco_sasa_write_plots_needs_matplotlib(tmp_path, monkeypatch):
+    from glycokit import utils  # pylint: disable=import-outside-toplevel
+    monkeypatch.setattr(utils.importlib.util, "find_spec", lambda name: None)
+    with pytest.raises(SystemExit) as exc:
+        sasa.main([*BASE, "-o", str(tmp_path / "o"), "--write-plots"])
+    assert exc.value.code == 2

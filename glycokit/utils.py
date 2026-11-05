@@ -1,5 +1,6 @@
 import functools
 import glob
+import importlib.util
 import math
 import os
 import platform
@@ -877,3 +878,15 @@ def resolve_workers(n):
         return max(1, len(os.sched_getaffinity(0)))
     except AttributeError:
         return max(1, os.cpu_count() or 1)
+
+
+def prepare_plotting(fail):
+    """
+    CLI only: fail early if matplotlib is missing, and use the Agg backend
+    unless the user set MPLBACKEND.
+
+    :param callable fail: Called with a message if matplotlib is missing.
+    """
+    if importlib.util.find_spec("matplotlib") is None:
+        fail("--write-plots needs matplotlib (pip install matplotlib)")
+    os.environ.setdefault("MPLBACKEND", "Agg")

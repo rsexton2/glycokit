@@ -12,8 +12,7 @@ from glycokit._cli_common import (
     n_workers_int, non_negative_float, positive_float,
 )
 from glycokit.parsers import (
-    SASA_CHIMERAX_STATS, base_parser, compare_parser, sasa_parser,
-    standardize_parser,
+    base_parser, compare_parser, sasa_parser, standardize_parser,
 )
 from glycokit.standardize import StandardizeOptions
 
@@ -285,6 +284,18 @@ def test_sasa_parser_viewer_rejects(argv):
     assert exc.value.code == 2
 
 
-def test_sasa_chimerax_stats_match_cli():
-    from glycokit import sasa  # pylint: disable=import-outside-toplevel
-    assert set(sasa.CHIMERAX_STATS) == set(SASA_CHIMERAX_STATS)
+def test_sasa_viewer_flags_match_glyco_run():
+    # pylint: disable=protected-access
+    def kinds(parser):
+        names = ("write_vmd", "write_chimerax", "write_stats", "write_plots")
+        return {a.dest: type(a) for a in parser._actions if a.dest in names}
+
+    assert kinds(sasa_parser()) == kinds(base_parser())
+    assert len(kinds(base_parser())) == 4
+
+
+@pytest.mark.parametrize("parser", [base_parser, sasa_parser])
+def test_write_plots_default_off(parser):
+    argv = ["-a", "in.pdb"]
+    assert parser().parse_args(argv).write_plots is False
+    assert parser().parse_args([*argv, "--write-plots"]).write_plots is True
