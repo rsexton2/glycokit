@@ -23,7 +23,9 @@ _CODES = {
 }
 
 _MODES = ("auto", "always", "never")
-_STATE = {"color_mode": "auto"}  # process-wide; changed only by set_color_mode()
+_STATE = {
+    "color_mode": "auto"
+}  # process-wide; changed only by set_color_mode()
 
 
 def set_color_mode(mode):
@@ -34,7 +36,8 @@ def set_color_mode(mode):
     :raises ValueError: On an unknown mode.
     """
     if mode not in _MODES:
-        raise ValueError(f"color mode must be auto, always or never, got {mode!r}")
+        raise ValueError(
+            f"color mode must be auto, always or never, got {mode!r}")
     _STATE["color_mode"] = mode
 
 
@@ -44,6 +47,11 @@ def _is_tty(stream):
         return stream.isatty()
     except (AttributeError, ValueError):
         return False
+
+
+def is_tty(stream=None):
+    """Whether ``stream`` (default stdout) is a terminal."""
+    return _is_tty(sys.stdout if stream is None else stream)
 
 
 def use_color(stream=None):
@@ -81,8 +89,7 @@ def style(text, *names, stream=None):
 def _line(tag, color, message, stream):
     print(
         f"{style(f'[{tag}]', 'bold', color, stream=stream)} {message}",
-        file=stream,
-        flush=True,
+        file=stream, flush=True,
     )
 
 
@@ -132,6 +139,5 @@ def written(label, path, n_rows=None, base=None):
     rows = f"  ({n_rows:,} rows)" if n_rows is not None else ""
     print(
         f"  {style('ok', 'green', 'bold')}  {label:<26} "
-        f"{style(path, 'cyan')}{style(rows, 'dim')}",
-        flush=True,
+        f"{style(path, 'cyan')}{style(rows, 'dim')}", flush=True,
     )

@@ -47,6 +47,7 @@ OUTPUT_FILES = {
     "frame_summary.csv": None,
     "glyco_stats.cxc": "write_chimerax",
     "glyco_timeseries.png": "write_plots",
+    "glyco_top_residues.png": "write_plots",
     "residue_histograms.csv": "write_stats",
     "residue_histograms.png": "write_plots",
     "residue_statistics.csv": "write_stats",

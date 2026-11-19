@@ -19,14 +19,69 @@ import csv
 import operator
 import warnings
 from pathlib import Path
+from typing import NamedTuple
 
 import MDAnalysis as mda
 import numpy as np
+from MDAnalysis import units as mda_units
 
 from glycokit import viewer_scripts as vs
 from glycokit.console import written
 from glycokit.structure_io import PDB_SUFFIXES, pdb_chain_map, write_pdb
 from glycokit.utils import _fmt_float, _resid_labels, pdb_atom_ids
+
+#: max coordinate difference (A) for a repeated first frame (XTC precision)
+DUPLICATE_ATOL = 0.01
+_RANK_LABELS = {
+    "mean": "mean",
+    "max": "maximum",
+    "std": "standard deviation",
+    "width": "95% interval width"
+}
+
+#: max coordinate difference (A) for a repeated first frame; covers the
+#: 0.001 nm rounding of GRO/XTC on both sides
+DUPLICATE_ATOL = 0.02
+#: display units of a time axis, largest first
+_TIME_UNITS = (("us", "µs"), ("ns", "ns"), ("ps", "ps"))
+#: line styles that tell residues apart when colours mean trajectories
+_LINESTYLES = (
+    "-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1)), (0, (1, 3)),
+    (0, (8, 2, 1, 2)))
+
+
+def _part_labels(paths):
+    """Legend label of each trajectory part: the file name, or run_1,
+    run_2, ... (in -b order) for every part if any name repeats or a
+    part has no file name."""
+    names = [Path(p).name if p else None for p in paths]
+    if None in names or len(set(names)) != len(names):
+        return [f"run_{i + 1}" for i in range(len(names))], True
+    return names, False
+
+
+def _time_unit(span_ps):
+    """``(factor, label)``: the largest unit in which ``span_ps`` is >= 1."""
+    for unit, label in _TIME_UNITS:
+        factor = mda_units.get_conversion_factor("time", "ps", unit)
+        if span_ps * factor >= 1:
+            return factor, label
+    return 1.0, "ps"
+
+
+class PlotAxis(NamedTuple):
+    """x-axis of the time-series plots."""
+    x: np.ndarray
+    seg: np.ndarray
+    keep: np.ndarray
+    label: str
+    names: list  # legend label of each trajectory part
+    renamed: bool = False  # True: names are run_1, run_2, ...
+
+
+def _reader_has_time(reader):
+    """False for formats without time information (time unit None)."""
+    return (getattr(reader, "units", None) or {}).get("time") is not None
 
 
 def _finite_max(values, default=0.0):
@@ -66,6 +121,10 @@ class ResidueOutputMixin:
     #: y-axis label and default file name of plot_timeseries()
     _plot_label = "value"
     _timeseries_plot_name = "residue_timeseries.png"
+    _top_residues_plot_name = "top_residues.png"
+    #: bin count of the marginal histograms for continuous values
+    _plot_min_bins = 10
+    _plot_max_bins = 60
 
     def __init_subclass__(cls, *, abstract=False, **kwargs):
         super().__init_subclass__(**kwargs)  # cooperative: AnalysisBase, object
@@ -458,27 +517,365 @@ class ResidueOutputMixin:
 
     # -- plots -------------------------------------------------------------
 
+    def _segment_info(self):
+        """Parts of the (chained) trajectory: first global frame, length,
+        file name, start times and duplicate first frames."""
+        reader = self.u.trajectory
+        readers = list(getattr(reader, "readers", None) or [reader])
+        n = len(readers)
+        lengths = np.array([r.n_frames for r in readers], dtype=int)
+
+        paths = [getattr(r, "filename", None) for r in readers]
+        names, renamed = _part_labels(paths)
+        info = {
+            "starts": np.concatenate(([0], np.cumsum(lengths)[:-1])),
+            "lengths": lengths,
+            "names": names,
+            "paths": [str(p) if p else "" for p in paths],
+            "renamed": renamed,
+            "timed": all(_reader_has_time(r) for r in readers),
+            "dt": np.ones(n),
+            "chain_t0": np.zeros(n),
+            "raw_t0": np.zeros(n),
+            "duplicates": set(),
+        }
+        old = int(reader.frame)
+        prev_xyz = prev_t = None
+        try:
+            for i, r in enumerate(readers):
+                info["chain_t0"][i] = reader[int(info["starts"][i])].time
+                ts = r[0]
+                info["raw_t0"][i] = ts.time
+                if info["timed"]:
+                    info["dt"][i] = float(r.dt)
+                if (prev_xyz is not None and np.allclose(
+                        prev_xyz, ts.positions, rtol=0, atol=DUPLICATE_ATOL)):
+                    info["duplicates"].add(i)
+                last = r[r.n_frames - 1]
+                prev_xyz, prev_t = last.positions.copy(), last.time
+        finally:
+            reader[old]  # pylint: disable=pointless-statement
+        return info
+
+    @staticmethod
+    def _concatenated_times(t, seg, keep, info):
+        """One continuous time axis (ps) built from each file's own clock."""
+        raw = info["raw_t0"][seg] + (t - info["chain_t0"][seg])
+        if np.all(np.diff(raw[keep]) > 0):
+            return raw  # continuation runs: the file clocks already continue
+        # every part restarts its clock: place the parts end to end
+        n, dups = len(info["starts"]), info["duplicates"]
+        offset = np.zeros(n)
+        for i in range(1, n):
+            span = (info["lengths"][i - 1] - 1) * info["dt"][i - 1]
+            gap = 0.0 if i in dups else info["dt"][i - 1]
+            offset[i] = offset[i - 1] + span + gap
+        return offset[seg] + (raw - info["raw_t0"][seg])
+
+    def _plot_axis(self, trajectories="concatenated"):
+        """x-axis of the analysed frames; times scaled to ps, ns or µs."""
+        if trajectories not in ("concatenated", "separate"):
+            raise ValueError(
+                "trajectories must be 'concatenated' or 'separate', got "
+                f"{trajectories!r}")
+        info = self._segment_info()
+        frames = self._analyzed_frames()
+        seg = np.searchsorted(info["starts"], frames, side="right") - 1
+        local = frames - info["starts"][seg]
+        n, dups = len(info["starts"]), info["duplicates"]
+        t = self._time_values()  # None without real time information
+        keep = np.ones(len(frames), dtype=bool)
+        note = ""
+
+        if n == 1:
+            x, label = (t, "time ({unit})") if t is not None else (
+                frames, "trajectory frame")
+        elif trajectories == "separate":
+            if t is not None:
+                x = t - info["chain_t0"][seg]
+                label = "time since segment start ({unit})"
+            else:
+                x, label = local, "frame within segment"
+        else:
+            keep = ~(np.isin(seg, sorted(dups)) & (local == 0))
+            if t is not None:
+                x = self._concatenated_times(t, seg, keep, info)
+                label = "time ({unit}, concatenated)"
+            else:
+                removed = np.cumsum([i in dups for i in range(n)])
+                x = frames - removed[seg]
+                label = "frame (concatenated trajectory)"
+            if dups:
+                note = f"; {len(dups)} duplicate frame(s) removed"
+
+        x = np.asarray(x, dtype=float)
+        if t is not None:
+            shown = x[keep]
+            factor, unit = _time_unit(
+                float(np.ptp(shown)) if shown.size else 0.0)
+            x = x * factor
+            label = label.format(unit=unit)
+        return PlotAxis(
+            x, seg, keep, label + note, info["names"], info["renamed"])
+
+    def _residue_order(self, cols):
+        """``cols`` ordered by chain, residue number and insertion code.
+
+        Which residues are shown is still decided by rank; this only makes
+        the panels read like the structure (A:ASN52, A:ASN90, B:ASN52).
+        """
+        cols = np.asarray(cols, dtype=int)
+        atoms = self._residue_column_atoms()
+        chains = self._atom_attr(atoms, "chainIDs")
+        icodes = self._atom_attr(atoms, "icodes")
+        try:
+            resids = np.asarray(atoms.resids, dtype=np.int64)
+        except (AttributeError, mda.exceptions.NoDataError):
+            resids = np.asarray(atoms.resindices, dtype=np.int64)
+
+        def key(c):
+            return (str(chains[c]), int(resids[c]), str(icodes[c]))
+
+        return np.asarray(sorted(cols.tolist(), key=key), dtype=int)
+
+    @staticmethod
+    def _legend_height(fontsize="small"):
+        """Height (inches) of a legend with a title row and one entry row."""
+        from matplotlib.font_manager import (
+            FontProperties,  # pylint: disable=import-outside-toplevel
+        )
+        fs = FontProperties(size=fontsize).get_size_in_points()
+        # two text rows plus border padding and frame: about 5 font sizes
+        return 5.0 * fs / 72.0
+
+    def _trajectory_legend(
+            self, parent, axis, used, colors, loc="outside lower center"):
+        """Legend with one colour per trajectory file: the title in the
+        first row, all entries in the second (width follows the entries)."""
+        from matplotlib.lines import (
+            Line2D,  # pylint: disable=import-outside-toplevel
+        )
+        title = (
+            "trajectory (run_n = n-th -b/--traj file)"
+            if axis.renamed else "trajectory")
+        return parent.legend(
+            handles=[
+                Line2D([], [], color=colors[s], label=axis.names[s])
+                for s in used
+            ], title=title, loc=loc, ncols=len(used), fontsize="small",
+            title_fontsize="small")
+
+    def _write_run_labels(self, axis, output):
+        """run_n -> file path table next to the plot (renamed labels only)."""
+        if not axis.renamed:
+            return None
+        info = self._segment_info()
+        path = Path(output).with_name("trajectory_runs.csv")
+        rows = [
+            [name, p, int(n)]
+            for name, p, n in zip(axis.names, info["paths"], info["lengths"])
+        ]
+        return self._write_csv(
+            path, path.name, ["label", "file", "n_frames"], [rows],
+            "Trajectory run labels")
+
+    @staticmethod
+    def _part_colors(n):
+        import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
+        cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        return [cycle[i % len(cycle)] for i in range(n)]
+
+    def top_residues(self, n=9, rank="mean", *, values=None, keep=None):
+        """Column indices of the ``n`` residues with the highest ``rank``
+        over the analysed frames (``keep``: frames to use)."""
+        if rank not in _RANK_LABELS:
+            raise ValueError(f"rank must be one of {sorted(_RANK_LABELS)}")
+        m = np.asarray(
+            self._residue_values() if values is None else values, dtype=float)
+        if keep is not None:
+            m = m[keep]
+        if rank == "width":
+            score = self.residue_statistics(values=m)["width"]
+        else:
+            with warnings.catch_warnings():  # all-NaN residues
+                warnings.simplefilter("ignore", RuntimeWarning)
+                score = {
+                    "mean": np.nanmean,
+                    "max": np.nanmax,
+                    "std": np.nanstd
+                }[rank](m, axis=0)
+        score = np.where(np.isfinite(score), score, -np.inf)
+        return np.argsort(-score, kind="stable")[:n]
+
+    def plot_top_residues(
+            self, output=None, *, n=9, rank="mean", trajectories="concatenated",
+            values=None, sharey=False, figsize=(13.0, 8.0), dpi=150):
+        """
+        Time series of the ``n`` (at most 9) residues with the highest
+        ``rank`` on a 3x3 grid, each with a horizontal histogram of the
+        shown frames in its right margin (requires matplotlib).
+
+        :param str trajectories: ``'concatenated'`` (one continuous x-axis,
+            duplicate first frames of chained parts removed) or
+            ``'separate'`` (x from each file's start).
+        :param str rank: ``'mean'``, ``'max'``, ``'std'`` or ``'width'``.
+        :param bool sharey: One y-range for all panels.
+        :param output: Default ``<outdir>/<_top_residues_plot_name>``.
+        :rtype: pathlib.Path
+        """
+        import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
+
+        self._require_run()
+        if not 1 <= n <= 9:
+            raise ValueError(f"n must be 1 to 9 (3x3 grid), got {n}")
+        m = np.asarray(
+            self._residue_values() if values is None else values, dtype=float)
+        if m.ndim != 2 or len(m) != self.n_frames:
+            raise ValueError(
+                f"values must be ({self.n_frames}, n_columns), got {m.shape}")
+
+        axis = self._plot_axis(trajectories)
+        cols = self._residue_order(
+            self.top_residues(n, rank, values=m, keep=axis.keep))
+        _, idents = self._column_identities()
+
+        parts = [
+            np.flatnonzero((axis.seg == s) & axis.keep)
+            for s in range(len(axis.names))
+        ]
+        used = [s for s, idx in enumerate(parts) if idx.size]
+        colors = self._part_colors(len(axis.names))
+
+        multi = len(used) > 1
+        fig = plt.figure(layout="constrained", figsize=figsize)
+        if multi:  # panels above, a separate strip for the legend below
+            leg_h = self._legend_height()
+            panels, legend_fig = fig.subfigures(
+                2, 1, height_ratios=(figsize[1] - leg_h, leg_h))
+        else:
+            panels, legend_fig = fig, None
+        grid = panels.subplots(3, 6, width_ratios=(4, 1) * 3, squeeze=False)
+        series, hists = grid[:, 0::2], grid[:, 1::2]
+        first = series[0, 0]
+
+        for k, (ax, hax) in enumerate(zip(series.flat, hists.flat)):
+            if k >= len(cols):
+                ax.set_visible(False)
+                hax.set_visible(False)
+                continue
+            if k:
+                ax.sharex(first)
+                if sharey:
+                    ax.sharey(first)
+            hax.sharey(ax)
+
+            c = cols[k]
+            y = m[:, c]
+            for s in used:
+                idx = parts[s]
+                ax.plot(
+                    axis.x[idx], y[idx], lw=1, color=colors[s],
+                    marker="o" if idx.size < 2 else None)
+            self._panel_histogram(
+                hax, y, parts, used, colors, self._hist_edges(y[axis.keep]))
+            hax.tick_params(axis="y", labelleft=False)
+            hax.tick_params(axis="x", labelsize="x-small")
+
+            chain, resid, resname = idents[c]
+            ax.set_title(
+                f"{chain}:{resname}{resid}" if chain else f"{resname}{resid}",
+                fontsize="medium")
+
+        # x tick labels only under the lowest visible panel of each column
+        for j in range(3):
+            rows = [i for i in range(3) if 3 * i + j < len(cols)]
+            for i in rows[:-1]:
+                series[i, j].tick_params(labelbottom=False)
+            if rows:
+                hists[rows[-1], j].set_xlabel("frames", fontsize="x-small")
+
+        panels.supxlabel(axis.label)
+        panels.supylabel(self._plot_label)
+        fig.suptitle(
+            f"{len(cols)} residues with the highest "
+            f"{_RANK_LABELS[rank]} {self._plot_label} (in residue order)")
+        if multi:
+            self._trajectory_legend(
+                legend_fig, axis, used, colors, loc="center")
+
+        output = self._output_path(output, self._top_residues_plot_name)
+        fig.savefig(output, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        self._write_run_labels(axis, output)
+        written("Top residues plot", output, base=self.outdir or ".")
+        return output
+
+    def _time_values(self):
+        """Times (ps) of the analysed frames, or None if the trajectory has
+        no time information (e.g. PDB/GRO: reader time unit None, so
+        MDAnalysis made up frame * 1 ps)."""
+        times = getattr(self, "times", None)
+        if times is None or len(times) != self.n_frames:
+            return None
+        reader = self.u.trajectory
+        readers = getattr(reader, "readers", None) or [reader]  # ChainReader
+        if any((getattr(r, "units", None) or {}).get("time") is None
+               for r in readers):
+            return None
+        t = np.asarray(times, dtype=float)
+        if len(t) < 2 or not np.all(np.isfinite(t)) or np.ptp(t) == 0:
+            return None
+        return t
+
     def _plot_x(self, x):
         """x values and axis label of the time-series plot."""
+        if x == "auto":
+            t = self._time_values()
+            if t is not None:
+                return t, "time (ps)"
+            return self._analyzed_frames(), "trajectory frame"
         if x == "frame":
             return self._analyzed_frames(), "trajectory frame"
         if x == "time":
-            times = getattr(self, "times", None)
-            if times is None or len(times) != self.n_frames:
-                raise RuntimeError("frame times are only available after run()")
-            return np.asarray(times, dtype=float), "time (ps)"
-        raise ValueError(f"x must be 'frame' or 'time', got {x!r}")
+            t = self._time_values()
+            if t is None:
+                raise ValueError(
+                    "the trajectory has no time information (or a single "
+                    "analysed frame); use x='frame' or x='auto'")
+            return t, "time (ps)"
+        raise ValueError(f"x must be 'auto', 'frame' or 'time', got {x!r}")
 
     def _hist_edges(self, values):
-        """Bin edges of residue_histograms() for ``values``."""
-        finite = values[np.isfinite(values)]
+        """Bin edges of a marginal histogram, limited to the data.
+
+        Integer values (no stats bin width): one bin per whole number.
+        Continuous values: the stats bin width divided by a whole number k,
+        so the edges of residue_histograms() are kept, with at least
+        _plot_min_bins and at most _plot_max_bins bins over the data.
+        """
+        a = np.asarray(values, dtype=float)
+        finite = a[np.isfinite(a)]
+        if not finite.size:
+            return np.array([-0.5, 0.5])
+        lo, hi = float(finite.min()), float(finite.max())
         width = self._stats_bin_width()  # pylint: disable=assignment-from-none
-        if width is None:  # one bin per integer 0..max
-            n_bins = int(np.floor(finite.max(initial=0))) + 1
-            return np.arange(n_bins + 1) - 0.5
+        if width is None:  # discrete counts
+            return np.arange(np.floor(lo), np.floor(hi) + 2) - 0.5
+
         width = float(width)
-        n_bins = int(np.floor(finite.max(initial=0) / width)) + 1
-        return np.arange(n_bins + 1) * width
+        span = hi - lo
+        k = 1
+        if span > 0:
+            target = max(1, min(self._plot_min_bins, finite.size))
+            h_auto = float(
+                np.diff(np.histogram_bin_edges(finite, bins="auto"))[0])
+            h = min(h_auto, span / target)
+            k = max(1, int(np.ceil(width / h)))
+            k = min(k, max(1, int(self._plot_max_bins * width / span)))
+        # integer bin indices on the grid width / k, so edges align exactly
+        i0 = int(np.floor(lo * k / width))
+        i1 = int(np.floor(hi * k / width))
+        return np.arange(i0, i1 + 2) * (width / k)
 
     @staticmethod
     def _reduce_columns(m, reduce):
@@ -490,27 +887,42 @@ class ResidueOutputMixin:
             total = total / np.maximum(n, 1)
         return np.where(n > 0, total, np.nan)
 
+    @staticmethod
+    def _panel_histogram(hax, y, parts, used, colors, bins):
+        """Horizontal histogram of ``y`` (shown frames), stacked by file."""
+        data = [y[parts[s]][np.isfinite(y[parts[s]])] for s in used]
+        if not any(d.size for d in data):
+            return
+        if len(used) > 1:
+            hax.hist(
+                data, bins=bins, orientation="horizontal", stacked=True,
+                histtype="stepfilled", alpha=0.6,
+                color=[colors[s] for s in used])
+        else:
+            hax.hist(
+                data[0], bins=bins, orientation="horizontal",
+                histtype="stepfilled", alpha=0.6, color=colors[used[0]])
+
     def plot_timeseries(
             self, residues=None, output=None, *, values=None, reduce="sum",
-            x="frame", max_residues=8, figsize=(8.0, 4.0), dpi=150):
+            trajectories="concatenated", max_residues=8, figsize=(8.0, 4.0),
+            dpi=150):
         """
         Line plot of the per-residue quantity over the analysed frames, with
-        a horizontal histogram of the same values in the right margin
-        (requires matplotlib).
+        a horizontal histogram in the right margin (requires matplotlib).
 
-        :param residues: Column indices (as in the CSV outputs); one line
-            and one histogram per residue. None: one line for the per-frame
-            ``reduce`` over all residues.
-        :param output: Default ``<outdir>/<_timeseries_plot_name>``.
-        :param values: (n_frames, n_columns) array; None uses the hook.
-        :param str reduce: ``'sum'`` or ``'mean'`` (only with residues=None).
-        :param str x: ``'frame'`` (trajectory frame) or ``'time'`` (ps).
-        :param int max_residues: Upper limit for ``residues``.
+        Several trajectory files get one colour each and a legend; residues
+        are then told apart by line style. Duplicate first frames are left
+        out when ``trajectories='concatenated'``.
+
+        :param residues: Column indices; None: the per-frame ``reduce``.
+        :param str trajectories: ``'concatenated'`` or ``'separate'``.
         :rtype: pathlib.Path
-        :raises RuntimeError: Before :meth:`run`.
-        :raises ValueError: Bad ``values``, ``reduce``, ``x`` or ``residues``.
         """
         import matplotlib.pyplot as plt  # pylint: disable=import-outside-toplevel
+        from matplotlib.lines import (
+            Line2D,  # pylint: disable=import-outside-toplevel
+        )
 
         self._require_run()
         m = np.asarray(
@@ -518,9 +930,10 @@ class ResidueOutputMixin:
         if m.ndim != 2:
             raise ValueError(
                 f"values must be (n_frames, n_columns), got {m.shape}")
-        xs, xlabel = self._plot_x(x)
-        if len(xs) != len(m):
-            raise ValueError(f"{len(m)} rows of values for {len(xs)} frames")
+        axis = self._plot_axis(trajectories)
+        if len(axis.x) != len(m):
+            raise ValueError(
+                f"{len(m)} rows of values for {len(axis.x)} frames")
 
         if residues is None:
             if reduce not in ("sum", "mean"):
@@ -545,28 +958,68 @@ class ResidueOutputMixin:
                 (f"{idents[i][0]}:{idents[i][2]}{idents[i][1]}", m[:, i])
                 for i in cols.tolist()
             ]
-            bins = self._hist_edges(m[:, cols])
+            bins = self._hist_edges(m[np.ix_(axis.keep, cols)])
+
+        parts = [
+            np.flatnonzero((axis.seg == s) & axis.keep)
+            for s in range(len(axis.names))
+        ]
+        used = [s for s, idx in enumerate(parts) if idx.size]
+        multi = len(used) > 1
+        colors = self._part_colors(max(len(axis.names), len(series)))
+        single = len(series) == 1
 
         fig, axs = plt.subplot_mosaic(
-            [["series", "hist"]], width_ratios=(4, 1), sharey=True,
+            [["series", "hist"]], width_ratios=(4, 1), sharey=False,
             layout="constrained", figsize=figsize)
         ax, hax = axs["series"], axs["hist"]
-        marker = "o" if len(xs) < 2 else None
-        single = len(series) == 1
-        for label, y in series:
-            (line, ) = ax.plot(xs, y, lw=1, marker=marker, label=label)
-            finite = y[np.isfinite(y)]
-            if finite.size:
-                hax.hist(
-                    finite, bins=bins, orientation="horizontal",
-                    color=line.get_color(),
-                    histtype="stepfilled" if single else "step",
-                    alpha=0.5 if single else 1.0)
-        ax.set_xlabel(xlabel)
+
+        for r, (label, y) in enumerate(series):
+            for s in used:  # one line per file: no line joins two files
+                idx = parts[s]
+                color = colors[s] if multi else colors[r]
+                ls = _LINESTYLES[r % len(_LINESTYLES)] if multi else "-"
+                ax.plot(
+                    axis.x[idx], y[idx], lw=1, ls=ls, color=color,
+                    marker="o" if idx.size < 2 else None,
+                    label=None if multi else label)
+
+        if multi and single:  # stacked histogram, coloured by trajectory
+            y = series[0][1]
+            data = [y[parts[s]][np.isfinite(y[parts[s]])] for s in used]
+            hax.hist(
+                data, bins=bins, orientation="horizontal", stacked=True,
+                histtype="stepfilled", alpha=0.6,
+                color=[colors[s] for s in used])
+        else:
+            for r, (_, y) in enumerate(series):
+                finite = y[axis.keep][np.isfinite(y[axis.keep])]
+                if finite.size:
+                    hax.hist(
+                        finite, bins=bins, orientation="horizontal",
+                        color="0.3" if multi else colors[r],
+                        linestyle=_LINESTYLES[r % len(_LINESTYLES)] if multi
+                        else "-", histtype="stepfilled" if single else "step",
+                        alpha=0.5 if single else 1.0)
+
+        ax.set_xlabel(axis.label)
         ax.set_ylabel(self._plot_label)
-        ax.legend(fontsize="small")
         hax.set_xlabel("frames")
         hax.tick_params(axis="y", labelleft=False)
+        if multi:
+            self._trajectory_legend(fig, axis, used, colors)
+            if single:
+                ax.set_title(series[0][0], fontsize="medium")
+            else:
+                ax.legend(
+                    handles=[
+                        Line2D(
+                            [], [], color="0.3",
+                            ls=_LINESTYLES[r % len(_LINESTYLES)], label=label)
+                        for r, (label, _) in enumerate(series)
+                    ], title="residue", fontsize="small")
+        else:
+            ax.legend(fontsize="small")
 
         output = self._output_path(output, self._timeseries_plot_name)
         fig.savefig(output, dpi=dpi)

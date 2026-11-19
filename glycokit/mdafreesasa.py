@@ -18,6 +18,9 @@ from MDAnalysis.analysis.results import ResultsGroup
 from MDAnalysis.guesser.default_guesser import DefaultGuesser
 from MDAnalysis.guesser.tables import vdwradii
 
+from glycokit.progress import (
+    mda_progressbar_kwargs, parallel_map, progress_mode,
+)
 from glycokit.residue_output import ResidueOutputMixin
 from glycokit.structure_io import pdb_chain_map
 from glycokit.utils import _fmt_float, resolve_workers
@@ -37,6 +40,33 @@ _FREESASA_ELEMENT_RADII = {
 
 # Fallback for other elements (ions, metals); may differ from the executable.
 _VDW_RADII = {str(k).strip().upper(): float(v) for k, v in vdwradii.items()}
+
+
+def _progress_backend_class():
+    """BackendBase subclass that moves a bar as computation groups finish."""
+    from MDAnalysis.analysis.backends import (  # pylint: disable=import-outside-toplevel
+        BackendBase,
+    )
+
+    class ProgressBackend(BackendBase):
+        """multiprocessing backend with a bar over computation groups."""
+
+        def __init__(
+                self, n_workers, *, desc="", verbose=None, progress_file=None):
+            super().__init__(n_workers=n_workers)
+            self._desc = desc
+            self._verbose = verbose
+            self._progress_file = progress_file
+
+        def _get_warnings(self):
+            return {}
+
+        def apply(self, func, computations):
+            return parallel_map(
+                func, computations, n_workers=self.n_workers, desc=self._desc,
+                unit="part", verbose=self._verbose)
+
+    return ProgressBackend
 
 
 def _freesasa_resname(name):
@@ -140,6 +170,7 @@ class FreesasaAnalysis(ResidueOutputMixin, AnalysisBase):
     _stats_quantity = "residue SASA"
     _plot_label = "SASA (Å$^2$)"
     _timeseries_plot_name = "sasa_timeseries.png"
+    _top_residues_plot_name = "sasa_top_residues.png"
 
     @classmethod
     def get_supported_backends(cls):
@@ -227,26 +258,10 @@ class FreesasaAnalysis(ResidueOutputMixin, AnalysisBase):
 
     # -- running -----------------------------------------------------------
 
-    def n_selected_frames(self, start=None, stop=None, step=None, frames=None):
-        """
-        Number of frames a run with this frame selection analyzes.
-
-        :param frames: Frame indices or a boolean mask (as for :meth:`run`).
-        :raises ValueError: If ``step`` is 0.
-        :rtype: int
-        """
-        if frames is not None:
-            f = np.asarray(frames)
-            return int(np.count_nonzero(f)) if f.dtype == bool else len(f)
-        if step == 0:
-            raise ValueError("step cannot be 0")
-        n_traj = self.ag.universe.trajectory.n_frames
-        return len(range(n_traj)[slice(start, stop, step)])
-
     def run_parallel(
             self, n_workers=-1, *, n_parts=None, verbose=False,
-            desc="Running FreeSASA Analysis", start=None, stop=None, step=None,
-            frames=None):
+            desc="Running FreeSASA Analysis", progress_file=None, start=None,
+            stop=None, step=None, frames=None):
         """
         Frame-parallel run when more than one worker and frame are available.
 
@@ -267,13 +282,32 @@ class FreesasaAnalysis(ResidueOutputMixin, AnalysisBase):
         n_sel = self.n_selected_frames(**sel)
         n = min(resolve_workers(n_workers), max(1, n_sel))
         if n > 1:
-            parts = None
-            if n_parts is not None:
-                parts = max(n, min(int(n_parts), n_sel))
+            # one part per worker would move the bar only n times
+            parts = max(n, min(int(n_parts or 4 * n), n_sel))
+            backend = _progress_backend_class()(
+                n_workers=n, desc=desc, verbose=verbose,
+                progress_file=progress_file)
             return self.run(
-                backend="multiprocessing", n_workers=n, n_parts=parts, **sel)
+                backend=backend, n_parts=parts, unsupported_backend=True, **sel)
         return self.run(
-            verbose=verbose, progressbar_kwargs={"desc": desc}, **sel)
+            verbose=progress_mode(verbose) == "bar",
+            progressbar_kwargs=mda_progressbar_kwargs(desc, verbose), **sel)
+
+    def n_selected_frames(self, start=None, stop=None, step=None, frames=None):
+        """
+        Number of frames a run with this frame selection analyzes.
+
+        :param frames: Frame indices or a boolean mask (as for :meth:`run`).
+        :raises ValueError: If ``step`` is 0.
+        :rtype: int
+        """
+        if frames is not None:
+            f = np.asarray(frames)
+            return int(np.count_nonzero(f)) if f.dtype == bool else len(f)
+        if step == 0:
+            raise ValueError("step cannot be 0")
+        n_traj = self.ag.universe.trajectory.n_frames
+        return len(range(n_traj)[slice(start, stop, step)])
 
     # -- CSV writers -------------------------------------------------------
 

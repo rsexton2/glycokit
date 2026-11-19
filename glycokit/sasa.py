@@ -17,6 +17,7 @@ from glycokit.config import _LOAD_ERRORS, _SELECTION_ERRORS
 from glycokit.console import heading, set_color_mode, style
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import sasa_parser
+from glycokit.progress import progress_verbose
 from glycokit.utils import (
     confirm_overwrite, heavy_atoms, load_universe, prepare_plotting,
 )
@@ -49,6 +50,8 @@ def planned_outputs(args):
         names.append(VMD_NAME)
         if not vs.vmd_readable(args.top):
             names.append(vs.vmd_structure_name(VMD_NAME))
+    if args.write_plots:
+        names.append(FreesasaAnalysis._top_residues_plot_name)
     return names
 
 
@@ -136,7 +139,7 @@ def main(argv=None):
                 f"FreeSASA structure check failed ({fsa.structure_message}); "
                 "areas use coordinates and radii only", stacklevel=1)
 
-        fsa.run_parallel(args.n_workers, verbose=True, **run)
+        fsa.run_parallel(args.n_workers, verbose=progress_verbose(args), **run)
 
         heading(f"Writing results to {style(outdir + '/', 'cyan')}")
         fsa.write_bfactors(
@@ -161,6 +164,7 @@ def main(argv=None):
 
         if args.write_plots:
             fsa.plot_timeseries()
+            fsa.plot_top_residues(trajectories=args.plot_trajectories)
 
         try:
             if args.write_vmd:

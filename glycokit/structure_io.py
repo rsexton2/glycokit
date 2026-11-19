@@ -7,7 +7,10 @@ Universe, because the writer replaces blank or non-standard chain IDs
 with 'X'. Only MDAnalysis is imported, so viewer_scripts.py can use it.
 """
 
+import re
+import string
 import warnings
+from collections import Counter
 from pathlib import Path
 
 from MDAnalysis.exceptions import NoDataError
@@ -23,83 +26,111 @@ _BASE36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 #: PDB segID columns 73-76
 PDB_SEGID_WIDTH = 4
 
+#: characters allowed in the single-column PDB chainID field, best first
+_CHAIN_POOL = string.ascii_uppercase + string.digits + string.ascii_lowercase
 
-def _pdb_char(c):
-    return c.isascii() and c.isalnum()
+#: water segment names of the common force fields / solvent models
+_WATER_IDS = frozenset(
+    """
+    TIP3 TIP3P TIP4 TIP4P TIP4PEW TIP5 TIP5P TP3M TP3P TP4E
+    SPC SPCE SWM4 SWM6 OPC OPC3 WAT WATER WT HOH H2O OH2 SOL SOLV SOLVENT
+""".split())
 
-
-def _distinct_position(ids, taken):
-    """Index (start first, then end) where every ID in ``ids`` has a distinct
-    letter/digit that is not in ``taken``; None if there is none."""
-    n = min(len(i) for i in ids)
-    for k in [*range(n), *range(-1, -n - 1, -1)]:
-        chars = [i[k] for i in ids]
-        if (all(_pdb_char(c) and c not in taken for c in chars)
-                and len(set(chars)) == len(chars)):
-            return k
-    return None
+#: segids starting with these are treated as water even when numbered
+#: (TIP3A, WAT1, SOL2, ...)
+_WATER_PREFIXES = re.compile(r"^(TIP[345]|TP[34]|WAT|SOL|HOH|SPC)", re.I)
 
 
-def _match_characters(ids, taken):
-    """One distinct character of each ID (bipartite matching), or None."""
-    options = {
-        i: [c for c in dict.fromkeys(i) if _pdb_char(c) and c not in taken]
-        for i in ids
-    }
-    owner = {}
+def _chain_candidates(chain_id, ambiguous):
+    """Single-character candidates for ``chain_id``, best first.
 
-    def assign(i, seen):
-        for c in options[i]:
-            if c in seen:
-                continue
+    * a known class (water) wins: TIP3 -> W
+    * otherwise the first character is the natural label: SOD -> S, CLA -> C
+    * when several IDs share that first character it cannot tell them apart,
+      so the distinguishing characters come first, scanned from the end
+      because CHARMM appends the chain letter: PROA -> A, PROB -> B
+    """
+    cls = _chain_class(chain_id) or ""
+    first = chain_id[0].upper()
+    tail = [c.upper() for c in reversed(chain_id[1:])]
+    if cls:
+        order = list(cls) + [first] + tail
+    elif ambiguous:
+        order = tail + [first]
+    else:
+        order = [first] + tail
+
+    out, seen = [], set()
+    for c in order + list(_CHAIN_POOL):  # PDB chainIDs are case-sensitive
+        if _pdb_char(c) and c not in seen:
             seen.add(c)
-            if c not in owner or assign(owner[c], seen):
-                owner[c] = i
-                return True
-        return False
-
-    for i in ids:
-        if not assign(i, set()):
-            return None
-    return {i: c for c, i in owner.items()}
+            out.append(c)
+    return out
 
 
 def pdb_chain_map(chains):
     """
     ``(mapping, message)``: one PDB chain character per chain ID.
 
-    Single-character IDs are kept; longer IDs get the character that tells
-    them apart (a common position, else one distinct character of each ID,
-    else the first character). ``message`` is None if nothing changed.
+    Single-character IDs (including the blank one) are kept; waters get
+    ``W``; every other long ID gets the character that tells it apart
+    (first character, or the distinguishing tail when several IDs share
+    it). ``message`` is None if nothing changed.
     """
     ids = list(dict.fromkeys(str(c).strip() for c in chains))
-    mapping = {c: c for c in ids if len(c) <= 1}
+    mapping = {c: c for c in ids if len(c) <= 1}  # keeps "" -> ""
     long = [c for c in ids if len(c) > 1]
     if not long:
         return mapping, None
-    taken = {c for c in mapping if c}
 
-    k = _distinct_position(long, taken)
-    if k is not None:
-        chosen = {c: c[k] for c in long}
-        how = (
-            f"character {k + 1}" if k >= 0 else f"character {-k} from the end")
-    else:
-        chosen = _match_characters(long, taken)
-        how = "a distinct character of each ID"
-    merged = chosen is None
-    if merged:
-        chosen = {c: c[0] for c in long}
-        how = "the first character"
+    classes = {c: _chain_class(c) for c in long}
+    # only IDs competing for their first character count here; waters are
+    # assigned from their class, so TIP3 no longer blocks "T"
+    firsts = Counter(c[0].upper() for c in long if classes[c] is None)
+
+    def priority(cid):  # waters first, they reserve W
+        if classes[cid]:
+            return 0
+        return 1 if firsts[cid[0].upper()] == 1 else 2
+
+    used = {c for c in mapping if c}  # single-character IDs are taken
+    chosen, merged = {}, False
+    for cid in sorted(long, key=priority):  # stable within a group
+        ambiguous = firsts[cid[0].upper()] > 1
+        for c in _chain_candidates(cid, ambiguous):
+            if c not in used:
+                chosen[cid] = c
+                used.add(c)
+                break
+        else:  # pool exhausted: IDs become equal
+            chosen[cid] = cid[0]
+            merged = True
     mapping.update(chosen)
 
     shown = ", ".join(f"{c}->{chosen[c]}" for c in long[:8])
     more = f" (+{len(long) - 8} more)" if len(long) > 8 else ""
     msg = (
-        f"chain IDs longer than 1 character are written as {how}: "
-        f"{shown}{more}" +
+        "chain IDs longer than 1 character are written as the character "
+        f"that tells them apart (waters as W): {shown}{more}; the full IDs "
+        "are kept in the segID column (73-76)" +
         (" (different chain IDs become equal)" if merged else ""))
     return mapping, msg
+
+
+def _pdb_char(c):
+    return c.isascii() and c.isalnum()
+
+
+def _chain_class(chain_id):
+    """Fixed candidate characters for a well-known ID class, else None.
+
+    Waters are a class of their own: their segid says nothing useful about
+    a chain, so they always get ``W`` (``w`` if ``W`` is taken).
+    """
+    cid = chain_id.upper()
+    if cid in _WATER_IDS or _WATER_PREFIXES.match(cid):
+        return "Ww"
+    return None
 
 
 def has_bonds(atoms):

@@ -244,3 +244,24 @@ def add_write_plots(group, files):
         f"also write {files} (PNG, requires matplotlib). Without a display "
         "the non-interactive Agg backend is used unless MPLBACKEND is set",
         dest="write_plots", action="store_true")
+
+
+def add_plot_trajectories(group):
+    """--plot-trajectories (shared by glyco run and glyco sasa)."""
+    add_option(
+        group, ("--plot-trajectories", ),
+        "how several -b/--traj files appear in the --write-plots plots: "
+        "concatenated (one continuous x-axis; a file's first frame is left "
+        "out if it repeats the previous file's last frame) or separate "
+        "(one line per file, x-axis from each file's start)",
+        dest="plot_trajectories", choices=("concatenated", "separate"),
+        default="concatenated")
+
+
+def add_progress(group):
+    """--progress (shared by glyco run and glyco sasa)."""
+    add_option(
+        group, ("--progress", ),
+        "progress bars: auto (only on a terminal), on, or off (also off "
+        "when GLYCO_NO_PROGRESS=1 or GLYCO_STREAMLIT=1)", dest="progress",
+        choices=("auto", "on", "off"), default="auto")

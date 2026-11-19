@@ -299,3 +299,14 @@ def test_write_plots_default_off(parser):
     argv = ["-a", "in.pdb"]
     assert parser().parse_args(argv).write_plots is False
     assert parser().parse_args([*argv, "--write-plots"]).write_plots is True
+
+
+@pytest.mark.parametrize("parser", [base_parser, sasa_parser])
+def test_plot_trajectories_option(parser):
+    argv = ["-a", "in.pdb"]
+    assert parser().parse_args(argv).plot_trajectories == "concatenated"
+    assert parser().parse_args(
+        [*argv, "--plot-trajectories",
+         "separate"]).plot_trajectories == "separate"
+    with pytest.raises(SystemExit):
+        parser().parse_args([*argv, "--plot-trajectories", "joined"])

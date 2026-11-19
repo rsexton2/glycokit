@@ -42,6 +42,9 @@ from glycokit.console import (
 )
 from glycokit.mdafreesasa import FreesasaAnalysis
 from glycokit.parsers import base_parser
+from glycokit.progress import (
+    Progress, mda_progressbar_kwargs, progress_verbose, write_progress_file,
+)
 from glycokit.residue_output import ResidueOutputMixin
 from glycokit.utils import (
     _cylinder_blocked, _first_altloc, _fmt_float, _legacy_coords,
@@ -108,6 +111,7 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
     _stats_quantity = "glycan count"
     _plot_label = "glycan count"
     _timeseries_plot_name = "glyco_timeseries.png"
+    _top_residues_plot_name = "glyco_top_residues.png"
 
     # Parameters set by _apply_params from base_parser() destinations.
     # Declared here for linters and readers; values come from the parser.
@@ -130,6 +134,7 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
     mode: str
     n_workers: int
     outdir: str
+    plot_trajectories: str
     prot_sel: str
     sasa_env: str | None
     sasa_hetatm: bool
@@ -544,7 +549,8 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
         # crashes the process. Parallelism is per frame only.
         fsa = FreesasaAnalysis(sasa_ag, self.sasa_probe)  # n_threads=1
         fsa.run_parallel(
-            self.n_workers, verbose=self._verbose, **self._run_slice)
+            self.n_workers, verbose=self._verbose,
+            progress_file=self.progress_file, **self._run_slice)
 
         self._diag(
             "[SASA diagnostic]", f"mode={self._mode}",
@@ -655,9 +661,13 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
         self._device = resolve_device(self.device, self._mode, self._error)
         self._validate_atom_selections()  # mode may have changed
 
-        self._write_progress(0, self.n_frames)
+        self._write_progress(0, self.n_frames, stage="FreeSASA")
         if self._verbose:
             print(self.selection_report())
+
+        else:
+            self.residue_areas = self._run_freesasa()
+        self._write_progress(0, self.n_frames, stage="coverage")
 
         prot_sel = self._validated_prot_sel
         gly_sel = self._validated_gly_sel
@@ -843,6 +853,7 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
             if self.write_plots:
                 self.plot_timeseries()
                 self.plot_histograms()
+                self.plot_top_residues(trajectories=self.plot_trajectories)
 
             self.write_run_config()
         self._frame_cache = None
@@ -1711,21 +1722,9 @@ class GlycoAnalysis(ResidueOutputMixin, AnalysisBase):
         written("Run configuration", output, base=self.outdir)
         return output
 
-    def _write_progress(self, current, total):
-        """Machine-readable progress JSON (``GLYCO_PROGRESS_FILE``), written
-        atomically."""
-        if not self.progress_file:
-            return
-        temp_file = self.progress_file + ".tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "current": current,
-                    "total": total,
-                    "percent": int(100 * current / total) if total else 0,
-                }, f,
-            )
-        os.replace(temp_file, self.progress_file)
+    def _write_progress(self, current, total, stage=None):
+        """Machine-readable progress JSON (``GLYCO_PROGRESS_FILE``)."""
+        write_progress_file(self.progress_file, current, total, stage)
 
     # endregion
 
@@ -1750,8 +1749,8 @@ def _run_job(args, top, traj, outdir, verbose, parser=None):
     GlycoAnalysis.from_args(
         u, args, parser=parser, top=top, traj=traj, indir=None,
         outdir=outdir).run(
-            verbose=verbose,
-            progressbar_kwargs={"desc": "Running GLYCO Analysis"})
+            verbose=verbose, progressbar_kwargs=mda_progressbar_kwargs(
+                "Running GLYCO Analysis", progress_verbose(args)))
 
 
 def _structure_outdirs(structures, base_outdir):
@@ -1799,17 +1798,25 @@ def main(argv=None):
     failures = []
     with warning_log(log_path):
         outdirs = _structure_outdirs(args.structures, args.outdir)
-        for n, (path, outdir) in enumerate(zip(args.structures, outdirs),
-                                           start=1):
-            heading(f"[{n}/{len(args.structures)}] {path}")
-            if not confirm_overwrite(outdir, args):
-                failures.append((path, "output exists and overwrite declined"))
-                continue
-            try:
-                _run_job(args, path, None, outdir, verbose)
-            except _JOB_ERRORS as e:
-                error(f"{path}: {e}")
-                failures.append((path, str(e)))
+        bar = Progress(
+            len(args.structures), "structures", "structure",
+            verbose=progress_verbose(args), leave=True, progress_file=None)
+        with bar:
+            for n, (path, outdir) in enumerate(zip(args.structures, outdirs),
+                                               1):
+                with bar.pause():
+                    heading(f"[{n}/{len(args.structures)}] {path}")
+                    if not confirm_overwrite(outdir, args):
+                        failures.append(
+                            (path, "output exists and overwrite declined"))
+                        continue
+                    try:
+                        _run_job(args, path, None, outdir, verbose)
+                    except _JOB_ERRORS as e:
+                        error(f"{path}: {e}")
+                        failures.append((path, str(e)))
+
+                bar.update(1)
 
     if failures:
         error(f"{len(failures)} of {len(args.structures)} structure(s) failed:")
