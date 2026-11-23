@@ -52,15 +52,17 @@ doc = [
 glyco = "glycokit.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["glycokit"]
+include = ["glycokit*"]
+
+[tool.setuptools.package-data]
+glycokit = ["data/legacy_pdbs/*.pdb"]
 
 [tool.pytest.ini_options]
+minversion = "7.0"               # was 6.0
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+testpaths = ["glycokit/tests"]
 filterwarnings = [
     "ignore:numpy.ndarray size changed:RuntimeWarning",
-]
-minversion = "6.0"
-testpaths = [
-    "glycokit/tests",
 ]
 console_output_style = "count"
 
