@@ -13,6 +13,6 @@ dependencies:
   - certifi
   - openssl
   - numba
-  - cupy; sys_platform != 'darwin'
+  - cupy # [not osx]
   - numba-cuda
 prefix: /home/r2/miniforge3/envs/glycotest
